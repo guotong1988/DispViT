@@ -80,29 +80,28 @@ class DispViT(nn.Module):
 
         features = self.encoder.get_intermediate_layers(img, self.intermediate_layer_idx[self.encoder_type], return_class_token=True)
 
-        coord, coord_logits = self.prediction_head(features, patch_h, patch_w)
+        disp, disp_logits = self.prediction_head(features, patch_h, patch_w)
         if padder is not None:
-            coord = padder.unpad(coord.unsqueeze(1)).squeeze(1)
-            coord_logits = padder.unpad(coord_logits)
-        return {"coord": coord, "coord_logits": coord_logits}
+            disp = padder.unpad(disp.unsqueeze(1)).squeeze(1)
+            disp_logits = padder.unpad(disp_logits)
+        return {"disp": disp, "disp_logits": disp_logits}
 
     def prediction_head(self, x, patch_h, patch_w):
-        soft_argmax_threshold = 20
+        soft_argmax_threshold = 7
         softmax_temperature = 0.5
-        coord_logits = self.dpt_head(x, patch_h, patch_w)
-        argmax_w = coord_logits.argmax(
+        disp_logits = self.dpt_head(x, patch_h, patch_w)
+        argmax_w = disp_logits.argmax(
             dim=1, keepdim=True
         )
-        index = torch.arange(coord_logits.shape[1], device=coord_logits.device).view(1, -1, 1, 1)
+        index = torch.arange(disp_logits.shape[1], device=disp_logits.device).view(1, -1, 1, 1)
         mask = (torch.abs(argmax_w - index) <= soft_argmax_threshold).float()
-        probs = F.softmax(coord_logits * softmax_temperature, dim=1) * mask
+        probs = F.softmax(disp_logits * softmax_temperature, dim=1) * mask
         probs = probs / probs.sum(dim=1, keepdim=True)
 
-        W = coord_logits.shape[-1]
-        ticks = torch.linspace(-0.1*W, W, 256, dtype=torch.float32, device=coord_logits.device).view(1, -1, 1, 1)
-        coord = torch.sum(probs * ticks, dim=1)
-        return coord, coord_logits
-    
+        ticks = torch.linspace(0, 765, 256, dtype=torch.float32, device=disp_logits.device).view(1, -1, 1, 1)
+        disp = torch.sum(probs * ticks, dim=1)
+        return disp, disp_logits
+
 
 class InputPadder:
     """ Pads images such that dimensions are divisible by given factor """

@@ -74,7 +74,7 @@ class DPTHead(nn.Module):
         self.scratch.refinenet4 = _make_fusion_block(features, has_residual=False)
 
         if hidden_dims is None:
-            hidden_dims = [features // 2] * 2
+            hidden_dims = [features // 2, 32]
         else:
             assert isinstance(hidden_dims, List) and len(hidden_dims) == 2
 

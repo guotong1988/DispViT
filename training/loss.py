@@ -6,8 +6,11 @@ from dataclasses import dataclass
 
 @dataclass(eq=False)
 class DispLoss(torch.nn.Module):
-    def __init__(self, **kwargs):
+    def __init__(self, disp, logits):
         super().__init__()
+        # Loss configuration dictionaries for each task
+        self.disp = disp
+        self.logits = logits
 
     def forward(self, predictions, batch) -> torch.Tensor:
         """
@@ -19,37 +22,32 @@ class DispLoss(torch.nn.Module):
             Dict containing individual losses and total objective
         """
         gt_disp = batch["disp"]
-        B, H, W = gt_disp.shape
-        coords_h, coords_w = torch.meshgrid(torch.arange(H, device=gt_disp.device), torch.arange(W, device=gt_disp.device), indexing='ij')
-        target_coord = coords_w[None] - gt_disp
         valid = torch.logical_and(batch["valid"], gt_disp < 192)
 
-        coord_loss = coordinate_loss(predictions["coord"], target_coord, valid)
-        logits_loss = coordinate_softmax(predictions["coord_logits"], target_coord, valid)
+        loss_disp = disp_loss(predictions["disp"], gt_disp, valid)
+        loss_logits = disp_softmax(predictions["disp_logits"], gt_disp, valid)
 
         loss_dict = {
-            "objective": 0.1*coord_loss + logits_loss,
-            "loss_coord": coord_loss,
-            "loss_logits": logits_loss,
+            "objective": self.disp["weight"]*loss_disp + self.logits["weight"]*loss_logits,
+            "loss_disp": loss_disp,
+            "loss_logits": loss_logits,
         }
         return loss_dict
 
 
-def coordinate_loss(pred_coord, target_coord, mask):
-    pred_coord = pred_coord.float()
-    target_coord = target_coord.float()
-    error = torch.abs(pred_coord - target_coord)
+def disp_loss(pred_disp, target_disp, mask):
+    pred_disp = pred_disp.float()
+    target_disp = target_disp.float()
+    error = torch.abs(pred_disp - target_disp)
     loss = (error * mask).sum() / (mask.sum() + 1e-6)
     return loss
 
 
-def coordinate_softmax(logits, labels, mask):
+def disp_softmax(logits, labels, mask):
     logits = logits.float()
     labels = labels.float()
-    W = logits.shape[-1]
-    labels += 0.1*W
-    labels = labels.clamp(0, 1.1*W)
-    interval = 1.1*W / 255.0
+    labels = labels.clamp(0, 765.0)
+    interval = 765.0 / 255.0
     labels = labels.unsqueeze(1) / interval
     lb = torch.floor(labels).long()
     hb = (1 + lb).clamp_max(255)
