@@ -32,16 +32,21 @@ class DispViT(nn.Module):
         dinov2_model = getattr(importlib.import_module("..layers.dinov2", __package__), f"dinov2_{encoder_type}14")
         encoder = dinov2_model(pretrained=init_weights)
 
-        # Reuse the pretrained Conv2d weights of patch embed layer and make it work with 6 input channels
-        # by duplicating the weights tensor of the proj layer and divide its value by two.
-        self.__build_patch_embed__(encoder.patch_embed)
-        self.encoder = encoder
+        self.pretrained = encoder
 
-        self.dpt_head = DPTHead(self.encoder.embed_dim, patch_size=self.encoder.patch_size, output_dim=256,
+        self.depth_head = DPTHead(encoder.embed_dim, patch_size=encoder.patch_size, output_dim=256,
                                 features=self.model_configs[encoder_type]["features"], 
                                 hidden_dims=[128, 128],
                                 out_channels=self.model_configs[encoder_type]["out_channels"])
         
+        # load depth anything weights
+        checkpoint = torch.load("depth_anything_v2_vitb.pth", map_location="cpu", weights_only=True)
+        self.load_state_dict(checkpoint, strict=False)
+
+        # Reuse the pretrained Conv2d weights of patch embed layer and make it work with 6 input channels
+        # by duplicating the weights tensor of the proj layer and divide its value by two.
+        self.__build_patch_embed__(encoder.patch_embed)
+
         # Register normalization constants as buffers
         for name, value in (("_resnet_mean", _RESNET_MEAN), ("_resnet_std", _RESNET_STD)):
             self.register_buffer(name, torch.FloatTensor(value).view(1, 3, 1, 1), persistent=False)
@@ -54,8 +59,8 @@ class DispViT(nn.Module):
             stride=patch_embed.proj.stride,
         )
         with torch.no_grad():
-            new_proj.weight[:, :3, :, :] = patch_embed.proj.weight / 2
-            new_proj.weight[:, 3:, :, :] = patch_embed.proj.weight / 2
+            new_proj.weight[:, :3, :, :] = patch_embed.proj.weight
+            new_proj.weight[:, 3:, :, :].zero_()
             if patch_embed.proj.bias is not None:
                 new_proj.bias.copy_(patch_embed.proj.bias)
         patch_embed.proj = new_proj
@@ -67,7 +72,7 @@ class DispViT(nn.Module):
 
         padder = None
         if not self.training:
-            padder = InputPadder(img.shape, mode="nmrf", divis_by=self.encoder.patch_size)
+            padder = InputPadder(img.shape, mode="nmrf", divis_by=self.pretrained.patch_size)
             img = padder.pad(img)[0]
 
         B, C_in, H, W = img.shape
@@ -76,9 +81,9 @@ class DispViT(nn.Module):
             raise ValueError(f"Expected 3 input channels, got {C_in}")
         
         # Normalize images
-        patch_h, patch_w = H // self.encoder.patch_size, W // self.encoder.patch_size
+        patch_h, patch_w = H // self.pretrained.patch_size, W // self.pretrained.patch_size
 
-        features = self.encoder.get_intermediate_layers(img, self.intermediate_layer_idx[self.encoder_type], return_class_token=True)
+        features = self.pretrained.get_intermediate_layers(img, self.intermediate_layer_idx[self.encoder_type], return_class_token=True)
 
         disp, disp_logits = self.prediction_head(features, patch_h, patch_w)
         if padder is not None:
@@ -89,7 +94,7 @@ class DispViT(nn.Module):
     def prediction_head(self, x, patch_h, patch_w):
         soft_argmax_threshold = 7
         softmax_temperature = 0.5
-        disp_logits = self.dpt_head(x, patch_h, patch_w)
+        disp_logits = self.depth_head(x, patch_h, patch_w)
         argmax_w = disp_logits.argmax(
             dim=1, keepdim=True
         )

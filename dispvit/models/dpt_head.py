@@ -81,10 +81,18 @@ class DPTHead(nn.Module):
         if feature_only:
             self.scratch.output_conv1 = nn.Conv2d(features, features, kernel_size=3, stride=1, padding=1)
         else:
-            self.scratch.output_conv1 = nn.Conv2d(
+            # self.scratch.output_conv1 = nn.Conv2d(
+            #     features, hidden_dims[0], kernel_size=3, stride=1, padding=1
+            # )
+            # self.scratch.output_conv2 = nn.Sequential(
+            #     nn.Conv2d(hidden_dims[0], hidden_dims[1], kernel_size=3, stride=1, padding=1),
+            #     nn.ReLU(inplace=True),
+            #     nn.Conv2d(hidden_dims[1], output_dim, kernel_size=1, stride=1, padding=0),
+            # )
+            self.scratch.output_conv1_ = nn.Conv2d(
                 features, hidden_dims[0], kernel_size=3, stride=1, padding=1
             )
-            self.scratch.output_conv2 = nn.Sequential(
+            self.scratch.output_conv2_ = nn.Sequential(
                 nn.Conv2d(hidden_dims[0], hidden_dims[1], kernel_size=3, stride=1, padding=1),
                 nn.ReLU(inplace=True),
                 nn.Conv2d(hidden_dims[1], output_dim, kernel_size=1, stride=1, padding=0),
@@ -119,7 +127,7 @@ class DPTHead(nn.Module):
         if self.feature_only:
             return out
         
-        preds = self.scratch.output_conv2(out)
+        preds = self.scratch.output_conv2_(out)
         return preds
 
     def scratch_forward(self, features: List[torch.Tensor]) -> torch.Tensor:
@@ -151,7 +159,7 @@ class DPTHead(nn.Module):
         out = self.scratch.refinenet1(out, layer_1_rn)
         del layer_1_rn, layer_1
 
-        out = self.scratch.output_conv1(out)
+        out = self.scratch.output_conv1_(out)
         return out
 
 

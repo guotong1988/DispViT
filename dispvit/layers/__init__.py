@@ -8,4 +8,5 @@ from .mlp import Mlp
 from .patch_embed import PatchEmbed
 from .swiglu_ffn import SwiGLUFFN, SwiGLUFFNFused
 from .block import NestedTensorBlock
-from .attention import MemEffAttention
+from .attention import Attention
+from .rope_position_encoding import RopePositionEmbedding

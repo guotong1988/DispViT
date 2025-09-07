@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 from torch.nn.init import trunc_normal_
-from . import Mlp, PatchEmbed, SwiGLUFFNFused, MemEffAttention, NestedTensorBlock as Block
+from . import Mlp, PatchEmbed, SwiGLUFFNFused, Attention, RopePositionEmbedding, NestedTensorBlock as Block
 
 logger = logging.getLogger("dinov2")
 
@@ -110,6 +110,16 @@ class DinoVisionTransformer(nn.Module):
         assert num_register_tokens >= 0
         self.register_tokens = (
             nn.Parameter(torch.zeros(1, num_register_tokens, embed_dim)) if num_register_tokens else None
+        )
+
+        self.rope_embed = RopePositionEmbedding(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            base=100.0,
+            normalize_coords="separate",
+            rescale_coords=2,
+            dtype=torch.bfloat16,
+            device=None,
         )
 
         if drop_path_uniform is True:
@@ -216,12 +226,12 @@ class DinoVisionTransformer(nn.Module):
             x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
 
         x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
-        x = x + self.interpolate_pos_encoding(x, w, h)
+        # x = x + self.interpolate_pos_encoding(x, w, h)
 
         if self.register_tokens is not None:
             x = torch.cat((x[:, :1], self.register_tokens.expand(x.shape[0], -1, -1), x[:, 1:]), dim=1)
 
-        return x
+        return x, (w // self.patch_size, h // self.patch_size)
     
     def forward_features_list(self, x_list, masks_list):
         x = [self.prepare_tokens_with_masks(x, masks) for x, masks in zip(x_list, masks_list)]
@@ -269,31 +279,39 @@ class DinoVisionTransformer(nn.Module):
         }
 
     def _get_intermediate_layers_not_chunked(self, x, n=1):
-        x = self.prepare_tokens_with_masks(x)
+        x, (H, W) = self.prepare_tokens_with_masks(x)
+        if self.rope_embed is not None:
+            rope_sincos = self.rope_embed(H=H, W=W)
+        else:
+            rope_sincos = None
         # If n is an int, take the n last blocks. If it's a list, take them
         output, total_block_len = [], len(self.blocks)
         blocks_to_take = range(total_block_len - n, total_block_len) if isinstance(n, int) else n
         for i, blk in enumerate(self.blocks):
             if self.training:
-                x = checkpoint(blk, x, use_reentrant=self.use_reentrant)
+                x = checkpoint(blk, x, rope_sincos, use_reentrant=self.use_reentrant)
             else:
-                x = blk(x)
+                x = blk(x, rope_sincos)
             if i in blocks_to_take:
                 output.append(x)
         assert len(output) == len(blocks_to_take), f"only {len(output)} / {len(blocks_to_take)} blocks found"
         return output
 
     def _get_intermediate_layers_chunked(self, x, n=1):
-        x = self.prepare_tokens_with_masks(x)
+        x, (H, W) = self.prepare_tokens_with_masks(x)
+        if self.rope_embed is not None:
+            rope_sincos = self.rope_embed(H=H, W=W)
+        else:
+            rope_sincos = None
         output, i, total_block_len = [], 0, len(self.blocks[-1])
         # If n is an int, take the n last blocks. If it's a list, take them
         blocks_to_take = range(total_block_len - n, total_block_len) if isinstance(n, int) else n
         for block_chunk in self.blocks:
             for blk in block_chunk[i:]:  # Passing the nn.Identity()
                 if self.training:
-                    x = checkpoint(blk, x, use_reentrant=self.use_reentrant)
+                    x = checkpoint(blk, x, rope_sincos, use_reentrant=self.use_reentrant)
                 else:
-                    x = blk(x)
+                    x = blk(x, rope_sincos)
                 if i in blocks_to_take:
                     output.append(x)
                 i += 1
@@ -349,7 +367,7 @@ def vit_small(patch_size=16, num_register_tokens=0, **kwargs):
         depth=12,
         num_heads=6,
         mlp_ratio=4,
-        block_fn=partial(Block, attn_class=MemEffAttention),
+        block_fn=partial(Block, attn_class=Attention),
         num_register_tokens=num_register_tokens,
         **kwargs,
     )
@@ -363,7 +381,7 @@ def vit_base(patch_size=16, num_register_tokens=0, **kwargs):
         depth=12,
         num_heads=12,
         mlp_ratio=4,
-        block_fn=partial(Block, attn_class=MemEffAttention),
+        block_fn=partial(Block, attn_class=Attention),
         num_register_tokens=num_register_tokens,
         **kwargs,
     )
@@ -377,7 +395,7 @@ def vit_large(patch_size=16, num_register_tokens=0, **kwargs):
         depth=24,
         num_heads=16,
         mlp_ratio=4,
-        block_fn=partial(Block, attn_class=MemEffAttention),
+        block_fn=partial(Block, attn_class=Attention),
         num_register_tokens=num_register_tokens,
         **kwargs,
     )
@@ -394,7 +412,7 @@ def vit_giant2(patch_size=16, num_register_tokens=0, **kwargs):
         depth=40,
         num_heads=24,
         mlp_ratio=4,
-        block_fn=partial(Block, attn_class=MemEffAttention),
+        block_fn=partial(Block, attn_class=Attention),
         num_register_tokens=num_register_tokens,
         **kwargs,
     )
