@@ -22,8 +22,6 @@ class RopePositionEmbedding(nn.Module):
         base: float | None = 100.0,
         min_period: float | None = None,
         max_period: float | None = None,
-        normalize_coords: Literal["min", "max", "separate"] = "separate",
-        rescale_coords: float | None = None,
         dtype: torch.dtype | None = None,
         device: torch.device | None = None,
     ):
@@ -38,8 +36,6 @@ class RopePositionEmbedding(nn.Module):
         self.min_period = min_period
         self.max_period = max_period
         self.D_head = D_head
-        self.normalize_coords = normalize_coords
-        self.rescale_coords = rescale_coords
 
         # Needs persistent=True because we do teacher.load_state_dict(student.state_dict()) to initialize the teacher
         self.dtype = dtype  # Don't rely on self.periods.dtype
@@ -55,33 +51,13 @@ class RopePositionEmbedding(nn.Module):
         dtype = self.dtype
         dd = {"device": device, "dtype": dtype}
 
-        # Prepare coords in range [-1, +1]
-        if self.normalize_coords == "max":
-            max_HW = max(H, W)
-            coords_h = torch.arange(0.5, H, **dd) / max_HW  # [H]
-            coords_w = torch.arange(0.5, W, **dd) / max_HW  # [W]
-        elif self.normalize_coords == "min":
-            min_HW = min(H, W)
-            coords_h = torch.arange(0.5, H, **dd) / min_HW  # [H]
-            coords_w = torch.arange(0.5, W, **dd) / min_HW  # [W]
-        elif self.normalize_coords == "separate":
-            coords_h = torch.arange(0.5, H, **dd) / H  # [H]
-            coords_w = torch.arange(0.5, W, **dd) / W  # [W]
-        else:
-            raise ValueError(f"Unknown normalize_coords: {self.normalize_coords}")
+        coords_h = torch.arange(H, **dd)  # [H]
+        coords_w = torch.arange(W, **dd)  # [W]
         coords = torch.stack(torch.meshgrid(coords_h, coords_w, indexing="ij"), dim=-1)  # [H, W, 2]
         coords = coords.flatten(0, 1)  # [HW, 2]
-        coords = 2.0 * coords - 1.0  # Shift range [0, 1] to [-1, +1]
-
-        # Rescale coords by multiplying the range [-1, 1] by a log-uniform value in [1/rescale, rescale]
-        if self.training and self.rescale_coords is not None:
-            rescale_max = np.log(self.rescale_coords)
-            rescale_min = -rescale_max
-            rescale_hw = torch.empty(1, **dd).uniform_(rescale_min, rescale_max).exp()
-            coords *= rescale_hw
 
         # Prepare angles and sin/cos
-        angles = 2 * math.pi * coords[:, :, None] / self.periods[None, None, :]  # [HW, 2, D//4]
+        angles = coords[:, :, None] / self.periods[None, None, :]  # [HW, 2, D//4]
         angles = angles.flatten(1, 2)  # [HW, D//2]
         angles = angles.tile(2)  # [HW, D]
         cos = torch.cos(angles)  # [HW, D]

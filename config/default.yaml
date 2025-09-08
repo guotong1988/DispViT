@@ -45,12 +45,12 @@ logging:
     train:
       keys_to_log:
         - loss_objective
-        - loss_coord
+        - loss_disp
         - loss_logits
     val:
       keys_to_log:
         - loss_objective
-        - loss_coord
+        - loss_disp
         - loss_logits
       
 checkpoint:
@@ -61,6 +61,10 @@ checkpoint:
 
 loss:
   _target_: training.loss.DispLoss
+  disp:
+    weight: 0.1
+  logits:
+    weight: 1.0
 
 optim:
   param_group_modifiers: False
@@ -78,10 +82,10 @@ optim:
   gradient_clip:
     _target_: training.train_utils.gradient_clip.GradientClipper
     configs:
-      - module_name: ["encoder"]
+      - module_name: ["pretrained"]
         max_norm: 1.0  # feel free to reduce this if see instabilities
         norm_type: 2
-      - module_name: ["dpt_head"]
+      - module_name: ["depth_head"]
         max_norm: 1.0  # feel free to reduce this if see instabilities
         norm_type: 2
   options:

@@ -116,8 +116,6 @@ class DinoVisionTransformer(nn.Module):
             embed_dim=embed_dim,
             num_heads=num_heads,
             base=100.0,
-            normalize_coords="separate",
-            rescale_coords=2,
             dtype=torch.bfloat16,
             device=None,
         )
