@@ -209,7 +209,7 @@ class Trainer:
             logging.info(f"Model state loaded. Missing keys: {missing or 'None'}. Unexpected keys: {unexpected or 'None'}.")
 
         # Load optimizer state if available and in training mode
-        if "optimizer" in checkpoint:
+        if "optimizer" in checkpoint and self.mode == "train":
             logging.info(f"Loading optimizer state dict (rank {self.rank})")
             if len(self.optims) == 1:
                 self.optims[0].optimizer.load_state_dict(checkpoint["optimizer"])
@@ -367,7 +367,7 @@ class Trainer:
             # Optionally run a final validation after all training is done
             self.run_val()
         elif self.mode == "val":
-            self.run_eval()
+            self.run_val()
         else:
             raise ValueError(f"Invalid mode: {self.mode}")
 
