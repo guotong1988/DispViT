@@ -46,11 +46,11 @@ def disp_loss(pred_disp, target_disp, mask):
 def disp_softmax(logits, labels, mask):
     logits = logits.float()
     labels = labels.float()
-    labels = labels.clamp(0, 765.0)
-    interval = 765.0 / 255.0
+    labels = labels.clamp(0, 381.0)
+    interval = 381.0 / 127.0
     labels = labels.unsqueeze(1) / interval
     lb = torch.floor(labels).long()
-    hb = (1 + lb).clamp_max(255)
+    hb = (1 + lb).clamp_max(127)
     labels_ = torch.zeros_like(logits)
     wh = labels - lb
     labels_.scatter_add_(1, lb, 1.0 - wh)

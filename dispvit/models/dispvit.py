@@ -65,7 +65,7 @@ class DispViT(nn.Module):
 
         self.pretrained = encoder
 
-        self.depth_head = DPTHead(encoder.embed_dim, patch_size=encoder.patch_size, output_dim=256,
+        self.depth_head = DPTHead(encoder.embed_dim, patch_size=encoder.patch_size, output_dim=128,
                                 features=self.model_configs[encoder_type]["features"], 
                                 hidden_dims=[128, 128],
                                 out_channels=self.model_configs[encoder_type]["out_channels"])
@@ -129,7 +129,7 @@ class DispViT(nn.Module):
         probs = F.softmax(disp_logits * softmax_temperature, dim=1) * mask
         probs = probs / probs.sum(dim=1, keepdim=True)
 
-        ticks = torch.linspace(0, 765, 256, dtype=torch.float32, device=disp_logits.device).view(1, -1, 1, 1)
+        ticks = torch.linspace(0, 381, 128, dtype=torch.float32, device=disp_logits.device).view(1, -1, 1, 1)
         disp = torch.sum(probs * ticks, dim=1)
         return disp, disp_logits
 
