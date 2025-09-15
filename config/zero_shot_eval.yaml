@@ -1,0 +1,11 @@
+defaults:
+  - default
+
+data:
+  val_dataset_names:
+    - kitti_2012_trainval
+    - kitti_2015_trainval
+    - eth3d
+    - middlebury_Q
+
+mode: val

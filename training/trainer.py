@@ -38,7 +38,8 @@ from .train_utils.freeze import freeze_modules
 from .train_utils.misc import *
 from .train_utils.logging import setup_logging
 from .train_utils.optimizer import construct_optimizers
-from .data.datasets import build_train_dataset, build_val_dataset
+from .eval_utils import print_csv_format
+from .data.datasets import build_val_dataset
 
 
 class Trainer:
@@ -73,6 +74,7 @@ class Trainer:
         limit_val_batches: Optional[int] = None,
         optim: Optional[Dict[str, Any]] = None,
         loss: Optional[Dict[str, Any]] = None,
+        eval: Optional[Dict[str, Any]] = None,
         env_variables: Optional[Dict[str, Any]] = None,
         accum_steps: int = 1,
         **kwargs,
@@ -96,6 +98,7 @@ class Trainer:
             limit_val_batches: Limit the number of validation batches per epoch (for debugging).
             optim: Hydra config for optimizers and schedulers.
             loss: Hydra config for the loss function.
+            eval: Hydra config for the evaluator.
             env_variables: Dictionary of environment variables to set.
             accum_steps: Number of steps to accumulate gradients before an optimizer step.
         """
@@ -106,6 +109,7 @@ class Trainer:
         self.data_conf = data
         self.model_conf = model
         self.loss_conf = loss
+        self.eval_conf = eval
         self.logging_conf = logging
         self.checkpoint_conf = checkpoint
         self.optim_conf = optim
@@ -128,7 +132,7 @@ class Trainer:
         # Setup logging directory and configure logger
         safe_makedirs(self.logging_conf.log_dir)
         setup_logging(
-            __name__,
+            "training",
             output_dir=self.logging_conf.log_dir,
             rank=self.rank,
             log_level_primary=self.logging_conf.log_level_primary,
@@ -163,7 +167,12 @@ class Trainer:
         self._setup_ddp_distributed_training(distributed, device)
 
         # Barrier to ensure all processes are synchronized before starting
-        dist.barrier()
+        if dist.get_backend() == dist.Backend.NCCL:
+        # This argument is needed to avoid warnings.
+        # It's valid only for NCCL backend.
+            dist.barrier(device_ids=[torch.cuda.current_device()])
+        else:
+            dist.barrier()
 
     def _setup_timers(self):
         """Initializes timers for tracking total elapsed time."""
@@ -175,7 +184,7 @@ class Trainer:
         if env_variables_conf:
             for variable_name, value in env_variables_conf.items():
                 os.environ[variable_name] = value
-        logging.info(f"Environment:\n{json.dumps(dict(os.environ), sort_keys=True, indent=2)}")
+        # logging.info(f"Environment:\n{json.dumps(dict(os.environ), sort_keys=True, indent=2)}")
 
     def _setup_torch_dist_and_backend(self, cuda_conf: Dict, distributed_conf: Dict) -> None:
         """Initializes the distributed process group and configures PyTorch backends."""
@@ -247,6 +256,7 @@ class Trainer:
         # Instantiate components from configs
         self.model = instantiate(self.model_conf, _recursive_=False)
         self.loss = instantiate(self.loss_conf, _recursive_=False)
+        self.evaluator = instantiate(self.eval_conf, _recursive_=False)
         self.gradient_clipper = instantiate(self.optim_conf.gradient_clip)
         self.scaler = torch.amp.GradScaler(enabled=self.optim_conf.amp.enabled)
 
@@ -403,9 +413,13 @@ class Trainer:
             logging.info("No validation dataset configured. Skipping validation.")
             return
 
-        for dataset in self.val_datasets:
+        for dataset, dataset_name in zip(self.val_datasets, self.data_conf.val_dataset_names):
             dataloader = dataset.get_loader(epoch=int(self.epoch + self.distributed_rank))
-            self.val_epoch(dataloader)
+            results = self.val_epoch(dataloader)
+
+            if results:
+                logging.info("Evaluation results for {} in csv format:".format(dataset_name))
+                print_csv_format(results)
 
             del dataloader
             gc.collect()
@@ -440,6 +454,7 @@ class Trainer:
         )
 
         self.model.eval()
+        self.evaluator.reset()
         end = time.time()
 
         iters_per_epoch = len(val_loader)
@@ -491,7 +506,9 @@ class Trainer:
             if data_iter % self.logging_conf.log_freq == 0:
                 progress.display(data_iter)
 
-        return True
+        results = self.evaluator.evaluate()
+
+        return results
 
     def train_epoch(self, train_loader):
         batch_time = AverageMeter("Batch Time", self.device, ":.4f")
@@ -665,6 +682,10 @@ class Trainer:
 
         # Loss computation
         loss_dict = self.loss(y_hat, batch)
+
+        # Pass to evaluator
+        if phase == "val" and self.val_datasets is not None:
+            self.evaluator.process(batch, y_hat)
 
         # Combine all data for logging
         log_data = {**y_hat, **loss_dict, **batch}

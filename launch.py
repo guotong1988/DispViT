@@ -4,24 +4,11 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-import argparse
-from hydra import initialize, compose
+import hydra
 from training.trainer import Trainer
 
-
-def main():
-    parser = argparse.ArgumentParser(description="Train model with configurable YAML file")
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="default",
-        help="Name of the config file (without .yaml extension, default: default)"
-    )
-    args = parser.parse_args()
-
-    with initialize(version_base=None, config_path="config"):
-        cfg = compose(config_name=args.config)
-
+@hydra.main(version_base=None, config_path="config", config_name="default")
+def main(cfg):
     trainer = Trainer(**cfg)
     trainer.run()
 

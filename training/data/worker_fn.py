@@ -90,8 +90,8 @@ def default_worker_init_fn(worker_id, num_workers, epoch, seed=0):
         + distributed_rank * DISTRIBUTED_RANK_MULTIPLIER
     )
 
-    print(f"Rank: {rank}, World size: {world_size}, Distributed rank: {distributed_rank}")
-    print(f"Worker seed: {worker_seed}")
+    # print(f"Rank: {rank}, World size: {world_size}, Distributed rank: {distributed_rank}")
+    # print(f"Worker seed: {worker_seed}")
     
     
     torch.random.manual_seed(worker_seed)
