@@ -14,6 +14,6 @@ model:
 
 checkpoint:
   save_freq: 30
-  no_resume_optimizer: False
+  no_resume_optimizer: True
 
-max_epochs: 100
+max_epochs: 67

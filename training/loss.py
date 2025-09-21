@@ -59,3 +59,46 @@ def disp_softmax(logits, labels, mask):
     mask = mask.float()
     loss = (loss * mask).sum() / (mask.sum() + 1e-6)
     return loss
+
+
+@dataclass(eq=False)
+class RefineLoss(torch.nn.Module):
+    def __init__(self, disp, loss_type, **kwargs_ignored):
+        super().__init__()
+        self.disp = disp
+        self.weights = disp["weight"]
+        if loss_type not in ['l1', 'smooth_l1']:
+            raise ValueError(f"Unsupported loss type: {loss_type}")
+        self.loss_type = loss_type
+        if loss_type == 'l1':
+            self.criterion = F.l1_loss
+        else:
+            self.criterion = F.smooth_l1_loss
+
+    def _loss_fn(self, pred, target, mask):
+        if torch.any(mask):
+            loss = self.criterion(pred[mask], target[mask], reduction='mean')
+        else:
+            loss = F.smooth_l1_loss(pred, pred.detach(), reduction='mean')
+        return loss
+
+    def forward(self, predictions, batch) -> torch.Tensor:
+        """
+        Args:
+            predictions: Dict containing model predictions for different tasks
+            batch: Dict containing ground truth data and masks
+
+        Returns:
+            Dict containing individual losses and total objective
+        """
+        gt_disp = batch["disp"]
+        valid = torch.logical_and(batch["valid"], gt_disp < self.disp["max_disp"])
+
+        disp_preds = predictions["disp_all"]
+        loss_disp = [self._loss_fn(pred, gt_disp, valid) for pred in disp_preds]
+        loss_dict = {
+            "objective": sum(w * l for w, l in zip(self.weights, loss_disp)),
+            "loss_disp": loss_disp[-1],
+            **{f"loss_disp_{i}": l for i, l in enumerate(loss_disp)},
+        }
+        return loss_dict

@@ -10,3 +10,4 @@ from .swiglu_ffn import SwiGLUFFN, SwiGLUFFNFused
 from .block import NestedTensorBlock
 from .attention import Attention
 from .rope_position_encoding import RopePositionEmbedding
+from .drop_path import DropPath
