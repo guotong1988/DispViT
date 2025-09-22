@@ -195,6 +195,142 @@ class WindowAttention(nn.Module):
         return f'dim={self.dim}, window_size={self.window_size}, shift_size={self.shift_size}, num_heads={self.num_heads}'
     
 
+class CrossAttention(nn.Module):
+    """ Window based multi-head positional sensitive cross attention (W-MSA).
+
+    Args:
+        dim (int): Number of input channels.
+        window_size (tuple[int]): The height and width of the query window.
+        stride (int): The downsample stride of query with respect to key/value.
+        num_heads (int): Number of attention heads.
+        qk_scale (float | None, optional): Override a default qk scale of head_dim ** -0.5 if set
+        attn_drop (float, optional): Dropout ratio of attention weight. Default: 0.0
+    """
+
+    def __init__(
+        self, 
+        dim,
+        q_dim,
+        kv_dim,
+        window_size, 
+        num_heads, 
+        qkv_bias=True,
+        proj_bias=True,
+        qk_scale=None, 
+        attn_drop=0.,
+        proj_drop=0.,
+    ):
+        super().__init__()
+        self.dim = dim
+        self.window_size = window_size  # Wh, Ww
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = qk_scale or head_dim ** -0.5
+        
+        # Ref: https://github.com/microsoft/Swin-Transformer/blob/main/models/swin_transformer.py
+        # define a parameter table of relative position bias
+        self.relative_position_enc_table = nn.Parameter(
+            torch.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), dim*3))  # 2*Wh-1 * 2*Ww-1, nH
+
+        # get pair-wise relative position index for each token inside the window
+        coords_h = torch.arange(self.window_size[0])
+        coords_w = torch.arange(self.window_size[1])
+        coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))  # 2, Wh, Ww
+        coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
+        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # 2, Wh*Ww, Wh*Ww
+        relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # Wh*Ww, Wh*Ww, 2
+        relative_coords[:, :, 0] += self.window_size[0] - 1  # shift to start from 0
+        relative_coords[:, :, 1] += self.window_size[1] - 1
+        relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
+        relative_position_index = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
+        self.register_buffer("relative_position_index", relative_position_index, persistent=False)
+
+        self.q = nn.Linear(q_dim, dim, bias=qkv_bias)
+        self.kv = nn.Linear(kv_dim, dim * 2, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+
+        self.proj = nn.Linear(dim, dim, bias=proj_bias)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+        self.init_weights()
+
+    def init_weights(self):
+        nn.init.trunc_normal_(self.relative_position_enc_table, std=0.02)
+        
+        for module in self.children():
+            if isinstance(module, nn.Linear):
+                nn.init.trunc_normal_(module.weight, std=0.02)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+    def window_partition(self, x):
+        """
+        x: [B,H,W,C]
+        Returns:
+            [B*num_windows,num_heads,window_size*window_size,head_dim]
+        """
+        x = einops.rearrange(x, 'b (i hs) (j ws) (h d) -> (b i j) h (hs ws) d',
+                             hs=self.window_size[0], ws=self.window_size[1], h=self.num_heads)
+        return x
+
+    def forward(self, x, context):
+        """
+        x:   [B,H,W,C]
+        context:  [B,H,W,C]
+        Returns:
+            B,H,W,C
+        """
+        _, H, W, _ = x.shape
+        q = self.q(x)
+        k, v = self.kv(context).chunk(2, dim=-1)
+
+        # pad feature maps to multiples of window size
+        window_size = self.window_size
+        pad_l = pad_t = 0
+        pad_r = (window_size[1] - W % window_size[1]) % window_size[1]
+        pad_b = (window_size[0] - H % window_size[0]) % window_size[0]
+        Hp = H + pad_b
+        Wp = W + pad_r
+        if pad_r > 0 or pad_b > 0:
+            q = nn.functional.pad(q, (0, 0, pad_l, pad_r, pad_t, pad_b))
+            k = nn.functional.pad(k, (0, 0, pad_l, pad_r, pad_t, pad_b))
+            v = nn.functional.pad(v, (0, 0, pad_l, pad_r, pad_t, pad_b))
+
+        q = self.window_partition(q)  # [B*num_windows,num_heads,window_size*window_size,head_dim]
+        k = self.window_partition(k)
+        v = self.window_partition(v)
+
+        # positional embedding
+        L = q.shape[2]
+        rpe = self.relative_position_enc_table[self.relative_position_index.view(-1)].view(
+            L, L, self.num_heads, -1)
+        q_rpe, k_rpe, v_rpe = rpe.chunk(3, dim=-1)
+
+        # window attention
+        q = q * self.scale
+        q_rpe = q_rpe * self.scale
+        qk = (q @ k.transpose(-2, -1))  # B head N C @ B head C N' --> B head N N'
+        qr = torch.einsum('bhic,ijhc->bhij', q, k_rpe)
+        kr = torch.einsum('bhjc,ijhc->bhij', k, q_rpe)
+        attn = qk + qr + kr
+        attn = attn.softmax(dim=-1, dtype=attn.dtype)
+        attn = self.attn_drop(attn)
+
+        x = attn @ v + torch.einsum('bhij,ijhc->bhic', attn, v_rpe)
+        x = einops.rearrange(x, '(b i j) h (hs ws) d -> b (i hs) (j ws) (h d)', 
+                             i=Hp//window_size[0],
+                             j=Wp//window_size[1], 
+                             hs=window_size[0], 
+                             ws=window_size[1])
+        
+        if pad_r > 0 or pad_b > 0:
+            x = x[:, :H, :W].contiguous()
+        
+        x = self.proj(x)
+        x = self.proj_drop(x)
+
+        return x
+
 def to_2tuple(x):
     if isinstance(x, tuple):
         assert len(x) == 2
@@ -305,6 +441,57 @@ class SwinNMP(nn.Module):
                f"window_size={self.window_size}, shift_size={self.shift_size}"
     
 
+class CrossBlock(nn.Module):
+    def __init__(
+        self,
+        dim,
+        q_dim,
+        kv_dim,
+        window_size,
+        num_heads,
+        mlp_ratio=4.0,
+        qkv_bias=True,
+        proj_bias=True,
+        qk_scale=None,
+        drop=0.,
+        attn_drop=0.,
+        drop_path=0.,
+        act_layer=nn.GELU,
+        norm_layer=nn.LayerNorm,
+        norm_mem=True,
+    ) -> None:
+        super().__init__()
+        self.attn = CrossAttention(
+            dim, q_dim, kv_dim, to_2tuple(window_size), num_heads, qkv_bias, proj_bias, qk_scale, attn_drop, drop,
+        )
+        self.norm1 = norm_layer(dim)
+
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.norm2 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = Mlp(
+            in_features=dim,
+            hidden_features=mlp_hidden_dim,
+            act_layer=act_layer,
+            drop=drop,
+        )
+        self.norm_y = norm_layer(dim) if norm_mem else nn.Identity()
+
+    def forward(self, x, context, x_pos=None, context_pos=None):
+        shortcut = x
+        if x_pos is not None:
+            x = torch.cat((self.norm1(x), x_pos), dim=-1)
+        else:
+            x = self.norm1(x)
+        if context_pos is not None:
+            context = torch.cat((self.norm_y(context), context_pos), dim=-1)
+        else:
+            context = self.norm_y(context)
+        x = shortcut + self.drop_path(self.attn(x, context))
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
+        return x
+    
+
 class RefineLayer(nn.Module):
     def __init__(
         self,
@@ -328,6 +515,15 @@ class RefineLayer(nn.Module):
         self.nmp = SwinNMP(dim, qkv_dim=qkv_dim, num_heads=num_heads, window_size=window_size, shift_size=shift_size, mlp_ratio=mlp_ratio, 
                            attn_drop=attn_drop, drop_path=drop_path, drop=drop, act_layer=act_layer, norm_layer=norm_layer)
         
+        # kwargs = dict(
+        #     dim=dim,
+        #     num_heads=num_heads,
+        #     mlp_ratio=mlp_ratio,
+        #     norm_layer=norm_layer,
+        #     norm_mem=True,
+        # )
+        # self.readout = CrossBlock(q_dim=dim+31, kv_dim=dim, window_size=window_size, **kwargs)
+        
     def forward(self, x, pos_embed, attn_mask):
         """
         x: [B,H,W,C], hypothesis embedding
@@ -336,6 +532,8 @@ class RefineLayer(nn.Module):
             attention mask for SW-MSA
         Returns: [B,H,W,C]
         """
+        # readout
+        # x = self.readout(x, context, x_pos=pos_embed)
         x = self.nmp(x, pos_embed=pos_embed, attn_mask=attn_mask)
         return x
 
@@ -397,6 +595,7 @@ class RefineNet(nn.Module):
             nn.Conv2d(128, 256, 1, 1, 0, bias=False)
         )
 
+        # self.feature_down = nn.Conv2d(128, embed_dim, kernel_size=4, stride=4, padding=0, bias=False)
         self.ffn = Mlp(embed_dim+32, embed_dim, embed_dim)
         self.norm = nn.LayerNorm(embed_dim, eps=1e-5)
 
@@ -413,8 +612,21 @@ class RefineNet(nn.Module):
                 drop_path=dpr[i],
             ) for i in range(num_blocks)
         ])
+        self.blocks_1 = nn.ModuleList([
+            RefineLayer(
+                dim=embed_dim,
+                window_size=4,
+                shift_size=0 if (i % 2 == 0) else 4 // 2,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                drop=drop,
+                attn_drop=attn_drop,
+                drop_path=dpr[i],
+            ) for i in range(num_blocks)
+        ])
 
-        self.head = Head(embed_dim, embed_dim, 4*4, 3)
+        self.head = Head(embed_dim, embed_dim, 8*8, 3)
+        self.head_1 = Head(embed_dim, embed_dim, 4*4, 3)
 
         # init weights
         self.apply(self._init_weights)
@@ -499,7 +711,7 @@ class RefineNet(nn.Module):
         return corr
     
     def patch_embed(self, proposal, fmap1, fmap2, fmap1_gw, fmap2_gw, normalizer=128):
-        H, W = fmap1.shape[2], fmap1.shape[3]
+        H, W = fmap1.shape[2:]
         warped_fmap2_gw = self.sample_fmap(fmap2_gw, proposal)  # [B,C,H,W]
         corr = self.corr(fmap1_gw, warped_fmap2_gw)  # [B,H,W,G]
         warped_fmap2 = self.sample_fmap(fmap2, proposal)  # [B,C,H,W]
@@ -515,29 +727,37 @@ class RefineNet(nn.Module):
         with torch.no_grad():
             regression_output = self.regressor(input)
             init_disp = regression_output["disp"].unsqueeze(1)  # [B,1,H,W]
+            context_raw = regression_output["feature"]  # [B,H,W,C]
+        # context = self.feature_down(context).permute(0, 2, 3, 1).contiguous()  # [B,H/4,W/4,C]
         img1 = (input['img1'] / 255.0 - self._resnet_mean) / self._resnet_std
         img2 = (input['img2'] / 255.0 - self._resnet_mean) / self._resnet_std
         if not self.training:
-            self.padder = InputPadder(img1.shape, mode="nmrf", divis_by=4)
-            img1, img2, init_disp = self.padder.pad(img1, img2, init_disp)
+            self.padder = InputPadder(img1.shape, mode="nmrf", divis_by=8)
+            img1, img2, init_disp, context_raw = self.padder.pad(img1, img2, init_disp, context_raw)
         else:
             self.padder = None
 
+        # downsample context feature to 1/8 resolution
+        IH, IW = img1.shape[2:]
+        # context = nn.functional.interpolate(context_raw, size=(IH // 8, IW // 8), mode='bilinear', align_corners=True).permute(0, 2, 3, 1).contiguous()
+
         img_batch = torch.cat([img1, img2], dim=0)
         fmap1, fmap2 = torch.chunk(self.extractor(img_batch), 2, dim=0)
+        fmap1_8x = nn.functional.avg_pool2d(fmap1, kernel_size=2, stride=2)
+        fmap2_8x = nn.functional.avg_pool2d(fmap2, kernel_size=2, stride=2)
         
-        fmap1_concat = self.concatconv(fmap1)
-        fmap2_concat = self.concatconv(fmap2)
-        fmap1_gw = self.gw(fmap1)
-        fmap2_gw = self.gw(fmap2)
+        fmap1_concat = self.concatconv(fmap1_8x)
+        fmap2_concat = self.concatconv(fmap2_8x)
+        fmap1_gw = self.gw(fmap1_8x)
+        fmap2_gw = self.gw(fmap2_8x)
 
-        init_disp = einops.rearrange(init_disp, 'b 1 (h hs) (w ws) -> (b h w) (hs ws)', hs=4, ws=4) / 4
+        init_disp = einops.rearrange(init_disp, 'b 1 (h hs) (w ws) -> (b h w) (hs ws)', hs=8, ws=8) / 8
         init_disp = torch.median(init_disp, dim=-1, keepdim=False).values  # [Bhw]
-        x, x_pos = self.patch_embed(init_disp, fmap1_concat, fmap2_concat, fmap1_gw, fmap2_gw, normalizer=128)
+        x, x_pos = self.patch_embed(init_disp, fmap1_concat, fmap2_concat, fmap1_gw, fmap2_gw, normalizer=64)
 
         # compute attnion mask for SW-MSA
         attn_mask = [None]
-        H, W = fmap1.shape[2:]
+        H, W = fmap1_8x.shape[2:]
         if self.num_blocks > 1:
             shift_size = self.window_size // 2
             Hp = int(np.ceil(H / self.window_size)) * self.window_size
@@ -561,12 +781,57 @@ class RefineNet(nn.Module):
         else:
             x = self.norm(x)[None]
 
-        disp_update = self.head(x)  # [num_aux_layers,B,H,W,4*4]
+        disp_update = self.head(x)  # [num_aux_layers,B,H,W,8*8]
         init_disp = einops.rearrange(init_disp, '(b h w) -> 1 b h w 1', h=H, w=W)   
-        disp_all = nn.functional.relu(init_disp + disp_update)  # [num_aux_layers,B,H,W,4*4]
-        disp_all = einops.rearrange(disp_all, 'n b h w (hs ws) -> n b (h hs) (w ws)', hs=4, ws=4).contiguous() * 4
+        disp_all = nn.functional.relu(init_disp + disp_update)  # [num_aux_layers,B,H,W,8*8]
+        disp_all = einops.rearrange(disp_all, 'n b h w (hs ws) -> n b (h hs) (w ws)', hs=8, ws=8).contiguous() * 8
 
-        disp = disp_all[-1]  # [B,H,W]
+        # ==== 1/4 resolution refinement ==== #
+        fmap1_concat = self.concatconv(fmap1)
+        fmap2_concat = self.concatconv(fmap2)
+        fmap1_gw = self.gw(fmap1)
+        fmap2_gw = self.gw(fmap2)
+        # context = nn.functional.interpolate(context_raw, size=(IH // 4, IW // 4), mode='bilinear', align_corners=True).permute(0, 2, 3, 1).contiguous()
+        
+        init_disp = einops.rearrange(disp_all[-1].detach(), 'b (h hs) (w ws) -> (b h w) (hs ws)', hs=4, ws=4) / 4
+        init_disp = torch.median(init_disp, dim=-1, keepdim=False).values  # [Bhw]
+        x, x_pos = self.patch_embed(init_disp, fmap1_concat, fmap2_concat, fmap1_gw, fmap2_gw, normalizer=128)
+
+        # compute attnion mask for SW-MSA
+        attn_mask = [None]
+        H, W = fmap1.shape[2:]
+        if self.num_blocks > 1:
+            shift_size = 4 // 2
+            Hp = int(np.ceil(H / 4)) * 4
+            Wp = int(np.ceil(W / 4)) * 4
+            attn_mask.append(
+                WindowAttention.gen_shift_window_attn_mask((Hp, Wp), to_2tuple(4), shift_size, device=x.device)
+            )
+
+        intermediates = []
+        for idx, blk in enumerate(self.blocks_1):
+            if self.training:
+                x = checkpoint(blk, x, x_pos, attn_mask[idx % 2], use_reentrant=self.use_reentrant)
+            else:
+                x = blk(x, x_pos, attn_mask[idx % 2])
+            if return_intermediate:
+                intermediates.append(self.norm(x))
+
+        if return_intermediate:
+            x = torch.stack(intermediates, dim=0)
+        else:
+            x = self.norm(x)[None]
+
+        disp_update = self.head_1(x)  # [num_aux_layers,B,H,W,4*4]
+        init_disp = einops.rearrange(init_disp, '(b h w) -> 1 b h w 1', h=H, w=W)   
+        disp_all_1 = nn.functional.relu(init_disp + disp_update)  # [num_aux_layers,B,H,W,4*4]
+        disp_all_1 = einops.rearrange(disp_all_1, 'n b h w (hs ws) -> n b (h hs) (w ws)', hs=4, ws=4).contiguous() * 4
+
+        disp = disp_all_1[-1]
         if self.padder is not None:
             disp = self.padder.unpad(disp.unsqueeze(1)).squeeze(1)
-        return {"disp": disp, "disp_all": disp_all}
+
+        predictions = {"disp": disp, "disp_all": torch.cat((disp_all, disp_all_1), dim=0)}
+        # if self.training:
+        #     predictions.update({"fmap1": fmap1, "fmap2": fmap2})
+        return predictions

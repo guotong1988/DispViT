@@ -128,7 +128,7 @@ class DPTHead(nn.Module):
             return out
         
         preds = self.scratch.output_conv2_(out)
-        return preds
+        return preds, out
 
     def scratch_forward(self, features: List[torch.Tensor]) -> torch.Tensor:
         """

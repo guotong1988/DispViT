@@ -36,7 +36,8 @@ max_epochs: 67
 loss:
   _target_: training.loss.RefineLoss
   disp:
-    weight: [0.7, 0.7, 0.8, 1.0, 1.0]
+    weight: [0.5, 0.5, 0.5, 0.7, 0.7, 0.7, 0.7, 0.8, 1.0, 1.0]
+    aux_weight: 0.1
   loss_type: l1
 
 logging:
@@ -50,14 +51,8 @@ logging:
       keys_to_log:
         - loss_objective
         - loss_disp
-        - loss_disp_0
-        - loss_disp_1
-        - loss_disp_2
-        - loss_disp_3
     val:
-      keys_to_log:
-        - loss_objective
-        - loss_disp
+      keys_to_log: []
 
 optim:
   frozen_module_names: ["regressor"]
@@ -89,6 +84,9 @@ optim:
       - module_name: ["head"]
         max_norm: 1.0  # feel free to reduce this if see instabilities
         norm_type: 2
+      - module_name: ["head_1"]
+        max_norm: 1.0  # feel free to reduce this if see instabilities
+        norm_type: 2
       - module_name: ["concatconv"]
         max_norm: 1.0  # feel free to reduce this if see instabilities
         norm_type: 2
@@ -102,5 +100,8 @@ optim:
         max_norm: 1.0  # feel free to reduce this if see instabilities
         norm_type: 2
       - module_name: ["blocks"]
+        max_norm: 1.0  # feel free to reduce this if see instabilities
+        norm_type: 2
+      - module_name: ["blocks_1"]
         max_norm: 1.0  # feel free to reduce this if see instabilities
         norm_type: 2

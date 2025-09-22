@@ -684,7 +684,10 @@ class Trainer:
         y_hat = model(batch)
 
         # Loss computation
-        loss_dict = self.loss(y_hat, batch)
+        if phase == "train":
+            loss_dict = self.loss(y_hat, batch)
+        else:
+            loss_dict = {}
 
         # Pass to evaluator
         if phase == "val" and self.val_datasets is not None:

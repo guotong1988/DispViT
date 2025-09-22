@@ -111,16 +111,17 @@ class DispViT(nn.Module):
 
         features = self.pretrained.get_intermediate_layers(img, self.intermediate_layer_idx[self.encoder_type], return_class_token=True)
 
-        disp, disp_logits = self.prediction_head(features, patch_h, patch_w)
+        disp, disp_logits, feature = self.prediction_head(features, patch_h, patch_w)
         if padder is not None:
             disp = padder.unpad(disp.unsqueeze(1)).squeeze(1)
             disp_logits = padder.unpad(disp_logits)
-        return {"disp": disp, "disp_logits": disp_logits}
+            feature = padder.unpad(feature)
+        return {"disp": disp, "disp_logits": disp_logits, "feature": feature}
 
     def prediction_head(self, x, patch_h, patch_w):
         soft_argmax_threshold = 7
         softmax_temperature = 0.5
-        disp_logits = self.depth_head(x, patch_h, patch_w)
+        disp_logits, feature = self.depth_head(x, patch_h, patch_w)
         argmax_w = disp_logits.argmax(
             dim=1, keepdim=True
         )
@@ -131,7 +132,7 @@ class DispViT(nn.Module):
 
         ticks = torch.linspace(0, 381, 128, dtype=torch.float32, device=disp_logits.device).view(1, -1, 1, 1)
         disp = torch.sum(probs * ticks, dim=1)
-        return disp, disp_logits
+        return disp, disp_logits, feature
 
 
 class InputPadder:
