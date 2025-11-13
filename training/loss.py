@@ -147,11 +147,16 @@ class RefineLoss(torch.nn.Module):
             loss_aux = 0.0
 
         disp_preds = predictions["disp_all"]
-        loss_disp = [self._loss_fn(pred, gt_disp, valid) for pred in disp_preds]
+        loss_disp_ = [self._loss_fn(pred, gt_disp, valid) for pred in disp_preds]
+        disp_vit_preds = predictions["disp_vit"]
+        loss_disp_vit = [self._loss_fn(pred, gt_disp, valid) for pred in disp_vit_preds]
+        assert len(disp_preds) == len(disp_vit_preds), f"Expected the same number of predictions from both branches, but got {len(disp_preds)} and {len(disp_vit_preds)}"
+        loss_disp = [l1 + l2 for l1, l2 in zip(loss_disp_, loss_disp_vit)]
         assert len(loss_disp) == len(self.weights), f"Expected {len(self.weights)} disparity predictions, but got {len(loss_disp)}"
         loss_dict = {
-            "objective": sum(w * l for w, l in zip(self.weights, loss_disp)) + self.disp["aux_weight"] * loss_aux,
-            "loss_disp": loss_disp[-1],
+            "objective": sum(w * l for w, l in zip(self.weights, loss_disp)),
+            "loss_disp": loss_disp_[-1],
+            "loss_disp_vit": loss_disp_vit[-1],
             "loss_aux": loss_aux,
             **{f"loss_disp_{i}": l for i, l in enumerate(loss_disp)},
         }

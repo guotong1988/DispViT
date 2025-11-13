@@ -515,16 +515,17 @@ class RefineLayer(nn.Module):
         self.nmp = SwinNMP(dim, qkv_dim=qkv_dim, num_heads=num_heads, window_size=window_size, shift_size=shift_size, mlp_ratio=mlp_ratio, 
                            attn_drop=attn_drop, drop_path=drop_path, drop=drop, act_layer=act_layer, norm_layer=norm_layer)
         
-        # kwargs = dict(
-        #     dim=dim,
-        #     num_heads=num_heads,
-        #     mlp_ratio=mlp_ratio,
-        #     norm_layer=norm_layer,
-        #     norm_mem=True,
-        # )
-        # self.readout = CrossBlock(q_dim=dim+31, kv_dim=dim, window_size=window_size, **kwargs)
+        kwargs = dict(
+            dim=dim,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            norm_layer=norm_layer,
+            norm_mem=True,
+        )
+        self.readout = CrossBlock(q_dim=dim+31, kv_dim=dim, window_size=window_size, **kwargs)
+        self.update = CrossBlock(q_dim=dim, kv_dim=dim+31, window_size=window_size, **kwargs)
         
-    def forward(self, x, pos_embed, attn_mask):
+    def forward(self, x, pos_embed, attn_mask, context):
         """
         x: [B,H,W,C], hypothesis embedding
         pos_embed: [B,H,W,C'], encoding of the underlying disparity
@@ -533,9 +534,11 @@ class RefineLayer(nn.Module):
         Returns: [B,H,W,C]
         """
         # readout
-        # x = self.readout(x, context, x_pos=pos_embed)
+        x = self.readout(x, context, x_pos=pos_embed)
         x = self.nmp(x, pos_embed=pos_embed, attn_mask=attn_mask)
-        return x
+        # update
+        context = self.update(context, x, context_pos=pos_embed)
+        return x, context
 
 
 class Head(nn.Module):
@@ -612,27 +615,25 @@ class RefineNet(nn.Module):
                 drop_path=dpr[i],
             ) for i in range(num_blocks)
         ])
-        self.blocks_1 = nn.ModuleList([
-            RefineLayer(
-                dim=embed_dim,
-                window_size=4,
-                shift_size=0 if (i % 2 == 0) else 4 // 2,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                drop=drop,
-                attn_drop=attn_drop,
-                drop_path=dpr[i],
-            ) for i in range(num_blocks)
-        ])
 
-        self.head = Head(embed_dim, embed_dim, 8*8, 3)
-        self.head_1 = Head(embed_dim, embed_dim, 4*4, 3)
+        self.head = Head(embed_dim, embed_dim, 4*4, 3)
+        self.vit_refine = Head(embed_dim, embed_dim, 4*4, 3)
 
         # init weights
         self.apply(self._init_weights)
 
         self.extractor = instantiate(self.extractor_cfg)
         self.regressor = instantiate(self.regressor_cfg)
+
+        # Load sceneflow pretrained model
+        logging.info(f"Resuming regression model from logs/refinenet_rvc/ckpts/checkpoint.pt")
+        with g_pathmgr.open("logs/refinenet_rvc/ckpts/checkpoint.pt", "rb") as f:
+            checkpoint = torch.load(f, map_location="cpu")
+        model_state_dict = checkpoint["model"] if "model" in checkpoint else checkpoint
+        missing, unexpected = self.load_state_dict(
+            model_state_dict, strict=True,
+        )
+        logging.info(f"Model state loaded. Missing keys: {missing or 'None'}. Unexpected keys: {unexpected or 'None'}.")
 
         # Load regressor model state
         logging.info(f"Resuming regression model from {regressor_pretrained_path}")
@@ -727,37 +728,36 @@ class RefineNet(nn.Module):
         with torch.no_grad():
             regression_output = self.regressor(input)
             init_disp = regression_output["disp"].unsqueeze(1)  # [B,1,H,W]
-            context_raw = regression_output["feature"]  # [B,H,W,C]
+            context_raw = regression_output["feature"]  # [B,C,H,W]
         # context = self.feature_down(context).permute(0, 2, 3, 1).contiguous()  # [B,H/4,W/4,C]
         img1 = (input['img1'] / 255.0 - self._resnet_mean) / self._resnet_std
         img2 = (input['img2'] / 255.0 - self._resnet_mean) / self._resnet_std
         if not self.training:
-            self.padder = InputPadder(img1.shape, mode="nmrf", divis_by=8)
+            self.padder = InputPadder(img1.shape, mode="nmrf", divis_by=4)
             img1, img2, init_disp, context_raw = self.padder.pad(img1, img2, init_disp, context_raw)
         else:
             self.padder = None
 
-        # downsample context feature to 1/8 resolution
+        # downsample context feature to 1/4 resolution
         IH, IW = img1.shape[2:]
-        # context = nn.functional.interpolate(context_raw, size=(IH // 8, IW // 8), mode='bilinear', align_corners=True).permute(0, 2, 3, 1).contiguous()
+        context = nn.functional.interpolate(context_raw, size=(IH // 4, IW // 4), mode='bilinear', align_corners=True).permute(0, 2, 3, 1).contiguous()
+        disp_vit_init = init_disp
 
         img_batch = torch.cat([img1, img2], dim=0)
         fmap1, fmap2 = torch.chunk(self.extractor(img_batch), 2, dim=0)
-        fmap1_8x = nn.functional.avg_pool2d(fmap1, kernel_size=2, stride=2)
-        fmap2_8x = nn.functional.avg_pool2d(fmap2, kernel_size=2, stride=2)
         
-        fmap1_concat = self.concatconv(fmap1_8x)
-        fmap2_concat = self.concatconv(fmap2_8x)
-        fmap1_gw = self.gw(fmap1_8x)
-        fmap2_gw = self.gw(fmap2_8x)
+        fmap1_concat = self.concatconv(fmap1)
+        fmap2_concat = self.concatconv(fmap2)
+        fmap1_gw = self.gw(fmap1)
+        fmap2_gw = self.gw(fmap2)
 
-        init_disp = einops.rearrange(init_disp, 'b 1 (h hs) (w ws) -> (b h w) (hs ws)', hs=8, ws=8) / 8
+        init_disp = einops.rearrange(init_disp, 'b 1 (h hs) (w ws) -> (b h w) (hs ws)', hs=4, ws=4) / 4
         init_disp = torch.median(init_disp, dim=-1, keepdim=False).values  # [Bhw]
-        x, x_pos = self.patch_embed(init_disp, fmap1_concat, fmap2_concat, fmap1_gw, fmap2_gw, normalizer=64)
+        x, x_pos = self.patch_embed(init_disp, fmap1_concat, fmap2_concat, fmap1_gw, fmap2_gw, normalizer=128)
 
         # compute attnion mask for SW-MSA
         attn_mask = [None]
-        H, W = fmap1_8x.shape[2:]
+        H, W = fmap1.shape[2:]
         if self.num_blocks > 1:
             shift_size = self.window_size // 2
             Hp = int(np.ceil(H / self.window_size)) * self.window_size
@@ -768,70 +768,73 @@ class RefineNet(nn.Module):
 
         return_intermediate = self.return_intermediate and self.training
         intermediates = []
+        vit_intermediates = []
         for idx, blk in enumerate(self.blocks):
             if self.training:
-                x = checkpoint(blk, x, x_pos, attn_mask[idx % 2], use_reentrant=self.use_reentrant)
+                x, context = checkpoint(blk, x, x_pos, attn_mask[idx % 2], context, use_reentrant=self.use_reentrant)
             else:
-                x = blk(x, x_pos, attn_mask[idx % 2])
+                x, context = blk(x, x_pos, attn_mask[idx % 2], context)
             if return_intermediate:
                 intermediates.append(self.norm(x))
+                vit_intermediates.append(context)
 
         if return_intermediate:
             x = torch.stack(intermediates, dim=0)
+            vit = torch.stack(vit_intermediates, dim=0)
         else:
             x = self.norm(x)[None]
+            vit = context[None]
 
-        disp_update = self.head(x)  # [num_aux_layers,B,H,W,8*8]
+        disp_update = self.head(x)  # [num_aux_layers,B,H,W,4*4]
         init_disp = einops.rearrange(init_disp, '(b h w) -> 1 b h w 1', h=H, w=W)   
-        disp_all = nn.functional.relu(init_disp + disp_update)  # [num_aux_layers,B,H,W,8*8]
-        disp_all = einops.rearrange(disp_all, 'n b h w (hs ws) -> n b (h hs) (w ws)', hs=8, ws=8).contiguous() * 8
+        disp_all = nn.functional.relu(init_disp + disp_update)  # [num_aux_layers,B,H,W,4*4]
+        disp_all = einops.rearrange(disp_all, 'n b h w (hs ws) -> n b (h hs) (w ws)', hs=4, ws=4).contiguous() * 4
 
-        # ==== 1/4 resolution refinement ==== #
-        fmap1_concat = self.concatconv(fmap1)
-        fmap2_concat = self.concatconv(fmap2)
-        fmap1_gw = self.gw(fmap1)
-        fmap2_gw = self.gw(fmap2)
-        # context = nn.functional.interpolate(context_raw, size=(IH // 4, IW // 4), mode='bilinear', align_corners=True).permute(0, 2, 3, 1).contiguous()
-        
-        init_disp = einops.rearrange(disp_all[-1].detach(), 'b (h hs) (w ws) -> (b h w) (hs ws)', hs=4, ws=4) / 4
+        disp_vit = einops.rearrange(disp_vit_init, 'b 1 h w -> 1 b h w')
+        disp_update = self.vit_refine(vit) # [num_aux_layers,B,H,W,4*4]
+        disp_update = einops.rearrange(disp_update, 'n b h w (hs ws) -> n b (h hs) (w ws)', hs=4, ws=4).contiguous()
+        disp_vit = nn.functional.relu(disp_vit + disp_update)
+
+        # next stage
+        init_disp = disp_all[-1].detach()
+        init_disp = einops.rearrange(init_disp, 'b (h hs) (w ws) -> (b h w) (hs ws)', hs=4, ws=4) / 4
         init_disp = torch.median(init_disp, dim=-1, keepdim=False).values  # [Bhw]
         x, x_pos = self.patch_embed(init_disp, fmap1_concat, fmap2_concat, fmap1_gw, fmap2_gw, normalizer=128)
 
-        # compute attnion mask for SW-MSA
-        attn_mask = [None]
-        H, W = fmap1.shape[2:]
-        if self.num_blocks > 1:
-            shift_size = 4 // 2
-            Hp = int(np.ceil(H / 4)) * 4
-            Wp = int(np.ceil(W / 4)) * 4
-            attn_mask.append(
-                WindowAttention.gen_shift_window_attn_mask((Hp, Wp), to_2tuple(4), shift_size, device=x.device)
-            )
-
         intermediates = []
-        for idx, blk in enumerate(self.blocks_1):
+        vit_intermediates = []
+        for idx, blk in enumerate(self.blocks):
             if self.training:
-                x = checkpoint(blk, x, x_pos, attn_mask[idx % 2], use_reentrant=self.use_reentrant)
+                x, context = checkpoint(blk, x, x_pos, attn_mask[idx % 2], context, use_reentrant=self.use_reentrant)
             else:
-                x = blk(x, x_pos, attn_mask[idx % 2])
+                x, context = blk(x, x_pos, attn_mask[idx % 2], context)
             if return_intermediate:
                 intermediates.append(self.norm(x))
+                vit_intermediates.append(context)
 
         if return_intermediate:
             x = torch.stack(intermediates, dim=0)
+            vit = torch.stack(vit_intermediates, dim=0)
         else:
             x = self.norm(x)[None]
+            vit = context[None]
 
-        disp_update = self.head_1(x)  # [num_aux_layers,B,H,W,4*4]
+        disp_update = self.head(x)  # [num_aux_layers,B,H,W,4*4]
         init_disp = einops.rearrange(init_disp, '(b h w) -> 1 b h w 1', h=H, w=W)   
         disp_all_1 = nn.functional.relu(init_disp + disp_update)  # [num_aux_layers,B,H,W,4*4]
         disp_all_1 = einops.rearrange(disp_all_1, 'n b h w (hs ws) -> n b (h hs) (w ws)', hs=4, ws=4).contiguous() * 4
+
+        disp_vit_1 = einops.rearrange(disp_vit_init, 'b 1 h w -> 1 b h w')
+        disp_update = self.vit_refine(vit) # [num_aux_layers,B,H,W,4*4]
+        disp_update = einops.rearrange(disp_update, 'n b h w (hs ws) -> n b (h hs) (w ws)', hs=4, ws=4).contiguous()
+        disp_vit_1 = nn.functional.relu(disp_vit_1 + disp_update)
+
 
         disp = disp_all_1[-1]
         if self.padder is not None:
             disp = self.padder.unpad(disp.unsqueeze(1)).squeeze(1)
 
-        predictions = {"disp": disp, "disp_all": torch.cat((disp_all, disp_all_1), dim=0)}
+        predictions = {"disp": disp, "disp_all": torch.cat((disp_all, disp_all_1), dim=0), "disp_vit": torch.cat((disp_vit, disp_vit_1), dim=0)}
         # if self.training:
         #     predictions.update({"fmap1": fmap1, "fmap2": fmap2})
         return predictions
