@@ -84,6 +84,7 @@ eval:
   only_valid: True
   thres:
     - 1
+    - 2
     - 3
   max_disp: 192
 

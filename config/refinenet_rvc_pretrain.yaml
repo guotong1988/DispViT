@@ -1,0 +1,50 @@
+defaults:
+  - refinenet
+  - _self_
+
+exp_name: refinenet_rvc_pretrain_gram_2
+
+model:
+  regressor_pretrained_path: logs/rvc_pretrain/ckpts/checkpoint.pt
+
+data:
+  train:
+    dataset:
+      datasets: 
+        - sceneflow
+        - tartan_air
+        - crestereo
+        - falling_things
+        - carla_highres
+        - in_stereo2k
+        - sintel_stereo
+        - vkitti2
+        - booster
+      folds: 
+        - 1
+        - 1
+        - 1
+        - 1
+        - 50
+        - 100
+        - 50
+        - 3
+        - 20
+  val_dataset_names:
+    - kitti_2012_trainval
+    - kitti_2015_trainval
+    - eth3d
+    - middlebury_Q
+
+loss:
+  disp:
+    max_disp: 256
+
+max_epochs: 1
+
+val_epoch_freq: 1
+
+checkpoint:
+  save_freq: 1
+  resume_checkpoint_path: logs/refinenet_rvc_pretrain_float_finetune/ckpts/checkpoint.pt
+  no_resume_optimizer: True

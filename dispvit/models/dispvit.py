@@ -114,7 +114,10 @@ class DispViT(nn.Module):
             disp = padder.unpad(disp.unsqueeze(1)).squeeze(1)
             disp_logits = padder.unpad(disp_logits)
             feature = padder.unpad(feature)
-        return {"disp": disp, "disp_logits": disp_logits, "feature": feature}
+        out =  {"disp": disp, "disp_logits": disp_logits, "feature": feature}
+        if self.training:
+            out["gram_feats"] = features
+        return out
 
     def prediction_head(self, x, patch_h, patch_w):
         soft_argmax_threshold = 7

@@ -258,7 +258,7 @@ class Trainer:
 
         # Instantiate components from configs
         self.model = instantiate(self.model_conf, _recursive_=False)
-        self.loss = instantiate(self.loss_conf, _recursive_=False)
+        self.loss = instantiate(self.loss_conf, _recursive_=False).cuda(self.local_rank)
         self.evaluator = instantiate(self.eval_conf, _recursive_=False)
         self.gradient_clipper = instantiate(self.optim_conf.gradient_clip)
         # self.scaler = torch.amp.GradScaler(enabled=self.optim_conf.amp.enabled)
@@ -619,6 +619,14 @@ class Trainer:
             if data_iter % self.logging_conf.log_freq == 0:
                 progress.display(data_iter)
 
+            if self.steps["train"] % 1000 == 0:
+                gc.collect()
+                torch.cuda.empty_cache()
+                torch.cuda.reset_peak_memory_stats()
+                self.run_val()
+                self.save_checkpoint(self.epoch, checkpoint_names=["checkpoint_latest"])
+                self.model.train()
+
         return True
 
     def _run_steps_on_batch_chunks(
@@ -682,6 +690,7 @@ class Trainer:
             A dictionary containing the computed losses.
         """
         # Forward pass
+        #y_hat = model.module.run_hierachical(batch)
         y_hat = model(batch)
 
         # Loss computation

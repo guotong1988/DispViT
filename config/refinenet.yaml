@@ -42,7 +42,12 @@ loss:
   _target_: training.loss.RefineLoss
   disp:
     weight: [0.7, 0.7, 0.8, 1.0, 1.0]
+  regress:
+    disp_weight: 0.1
+    logit_weight: 1.0
   loss_type: l1
+  gram:
+    weight: 1.0
 
 logging:
   log_dir: logs/${exp_name}
@@ -56,6 +61,8 @@ logging:
         - loss_objective
         - loss_disp
         - loss_disp_vit
+        - loss_disp_regress
+        - loss_gram_anchoring
     val:
       keys_to_log: []
 
@@ -63,7 +70,7 @@ optim:
   # frozen_module_names: ["regressor"]
 
   amp:
-    enabled: True
+    enabled: False
 
   options:
     lr:
@@ -94,7 +101,12 @@ optim:
     weight_decay:
       - scheduler:
           _target_: fvcore.common.param_scheduler.ConstantParamScheduler
+          value: 0.00001
+      - scheduler:
+          _target_: fvcore.common.param_scheduler.ConstantParamScheduler
           value: 0.05
+        param_names:
+          - regressor.*
 
   gradient_clip:
     _target_: training.train_utils.gradient_clip.GradientClipper
@@ -109,5 +121,8 @@ optim:
         max_norm: 1.0  # feel free to reduce this if see instabilities
         norm_type: 2
       - module_name: ["norm", "blocks"]
+        max_norm: 1.0  # feel free to reduce this if see instabilities
+        norm_type: 2
+      - module_name: ["regressor"]
         max_norm: 1.0  # feel free to reduce this if see instabilities
         norm_type: 2

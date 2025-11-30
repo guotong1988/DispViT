@@ -4,6 +4,12 @@ import einops
 
 from dataclasses import dataclass
 
+from dispvit.depth_anything.depth_anything import DepthAnything
+
+
+_RESNET_MEAN = [0.485, 0.456, 0.406]
+_RESNET_STD = [0.229, 0.224, 0.225]
+
 
 @dataclass(eq=False)
 class DispLoss(torch.nn.Module):
@@ -39,8 +45,8 @@ class DispLoss(torch.nn.Module):
 def disp_loss(pred_disp, target_disp, mask):
     pred_disp = pred_disp.float()
     target_disp = target_disp.float()
-    error = torch.abs(pred_disp - target_disp)
-    loss = (error * mask).sum() / (mask.sum() + 1e-6)
+    error = torch.abs(pred_disp[mask] - target_disp[mask])
+    loss = error.sum() / (mask.sum() + 1e-6)
     return loss
 
 
@@ -64,7 +70,7 @@ def disp_softmax(logits, labels, mask):
 
 @dataclass(eq=False)
 class RefineLoss(torch.nn.Module):
-    def __init__(self, disp, loss_type, **kwargs_ignored):
+    def __init__(self, disp, loss_type, regress, gram, **kwargs_ignored):
         super().__init__()
         self.disp = disp
         self.weights = disp["weight"]
@@ -75,6 +81,16 @@ class RefineLoss(torch.nn.Module):
             self.criterion = F.l1_loss
         else:
             self.criterion = F.smooth_l1_loss
+        self.regress = regress
+        self.gram = gram
+
+        pretrained_model_name_or_path = 'depth_anything_v2_vitl.pth'
+        self.dav2 = DepthAnything.from_pretrained(pretrained_model_name_or_path)
+        self.dav2.freeze()
+
+        # Register normalization constants as buffers
+        for name, value in (("_resnet_mean", _RESNET_MEAN), ("_resnet_std", _RESNET_STD)):
+            self.register_buffer(name, torch.FloatTensor(value).view(1, 3, 1, 1), persistent=False)
 
     def _loss_fn(self, pred, target, mask):
         if torch.any(mask):
@@ -83,51 +99,20 @@ class RefineLoss(torch.nn.Module):
             loss = F.smooth_l1_loss(pred, pred.detach(), reduction='mean')
         return loss
     
-    def _loss_aux(self, fmap1, fmap2, target):
-        fmap1 = F.avg_pool2d(fmap1, kernel_size=2, stride=2)
-        fmap2 = F.avg_pool2d(fmap2, kernel_size=2, stride=2)
-        cost_volume = build_correlation_volume(fmap1, fmap2, 40)
-        prob = cost_volume.softmax(dim=1).permute(0, 2, 3, 1).flatten(0, 2)  # [BHW,40]
+    def gram_loss(self, pred, batch):
+        img1 = (batch["img1"] / 255.0 - self._resnet_mean) / self._resnet_std
 
-        B, H, W = target.shape
-        target = torch.clamp(target, min=0)
-        valid = (target > 0) & (target < 320)
+        with torch.no_grad():
+            with torch.autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16):
+                target_feats = self.dav2.pretrained.get_intermediate_layers(img1, self.dav2.intermediate_layer_idx[self.dav2.encoder], return_class_token=True)
+        student_feats = pred['gram_feats']
 
-        ref = torch.arange(0, W, dtype=torch.long, device=prob.device).reshape(1, 1, -1).expand(B, H, W)
-        coord = ref - target  # corresponding coordinate in the right view
-        valid = torch.logical_and(valid, coord >= 0)  # correspondence should within image boundary
-
-        # scale ground truth disparity
-        tgt = target / 8
-
-        weights = torch.ones_like(tgt)
-        weights[~valid] = 0.0
-
-        N = 40
-        tgt = einops.rearrange(tgt, 'b (h m) (w n) -> (b h w) (m n)', m=8, n=8)
-        weights = einops.rearrange(weights, 'b (h m) (w n) -> (b h w) (m n)', m=8, n=8)
-        valid = einops.rearrange(valid, 'b (h m) (w n) -> (b h w) (m n)', m=8, n=8)
-        lower_bound = torch.floor(tgt).to(torch.long)
-        high_bound = lower_bound + 1
-        high_prob = tgt - lower_bound
-        lower_bound = torch.clamp(lower_bound, max=N - 1)
-        high_bound = torch.clamp(high_bound, max=N - 1)
-
-        lower_prob = (1 - high_prob) * weights
-        high_prob = high_prob * weights
-
-        label = torch.zeros_like(prob)
-        label.scatter_reduce_(dim=-1, index=lower_bound, src=lower_prob, reduce="sum")
-        label.scatter_reduce_(dim=-1, index=high_bound, src=high_prob, reduce="sum")
-
-        # normalize weights
-        normalizer = torch.clamp(torch.sum(label, dim=-1, keepdim=True), min=1e-3)
-        label = label / normalizer
-
-        mask = label > 0
-        log_prob = -(torch.log(torch.clamp(prob[mask], min=1e-5)) * label[mask]).sum()
-        valid_pixs = (valid.float().sum(dim=-1) > 0).sum()
-        return log_prob / (valid_pixs + 1e-5)
+        loss = []
+        for target_feat, student_feat in zip(target_feats, student_feats):
+            target_feat = target_feat[0]
+            student_feat = student_feat[0]
+            loss.append(gram_loss_fn(student_feat, target_feat))
+        return sum(loss) / len(loss)
 
     def forward(self, predictions, batch) -> torch.Tensor:
         """
@@ -141,11 +126,6 @@ class RefineLoss(torch.nn.Module):
         gt_disp = batch["disp"]
         valid = torch.logical_and(batch["valid"], gt_disp < self.disp["max_disp"])
 
-        if "fmap1" in predictions and "fmap2" in predictions:
-            loss_aux = self._loss_aux(predictions["fmap1"], predictions["fmap2"], gt_disp)
-        else:
-            loss_aux = 0.0
-
         disp_preds = predictions["disp_all"]
         loss_disp_ = [self._loss_fn(pred, gt_disp, valid) for pred in disp_preds]
         disp_vit_preds = predictions["disp_vit"]
@@ -153,30 +133,42 @@ class RefineLoss(torch.nn.Module):
         assert len(disp_preds) == len(disp_vit_preds), f"Expected the same number of predictions from both branches, but got {len(disp_preds)} and {len(disp_vit_preds)}"
         loss_disp = [l1 + l2 for l1, l2 in zip(loss_disp_, loss_disp_vit)]
         assert len(loss_disp) == len(self.weights), f"Expected {len(self.weights)} disparity predictions, but got {len(loss_disp)}"
+
+        loss_disp_regress = disp_loss(predictions["disp_regress"], gt_disp, valid)
+        loss_logits = disp_softmax(predictions["disp_logits"], gt_disp, valid)
+
+        # Gram loss computation
+        loss_gram_anchoring = self.gram_loss(predictions, batch)
+
         loss_dict = {
-            "objective": sum(w * l for w, l in zip(self.weights, loss_disp)),
+            "objective": sum(w * l for w, l in zip(self.weights, loss_disp)) + loss_disp_regress * self.regress["disp_weight"] + loss_logits * self.regress["logit_weight"] + loss_gram_anchoring * self.gram["weight"],
             "loss_disp": loss_disp_[-1],
             "loss_disp_vit": loss_disp_vit[-1],
-            "loss_aux": loss_aux,
+            "loss_disp_regress": loss_disp_regress,
+            "loss_gram_anchoring": loss_gram_anchoring,
             **{f"loss_disp_{i}": l for i, l in enumerate(loss_disp)},
         }
         return loss_dict
     
 
-def build_correlation_volume(refimg_fea, targetimg_fea, max_disp):
-    """ Build correlation volume for cost volume construction
+def gram_loss_fn(output_feats, target_feats):
+    """Compute the MSE loss between the gram matrix of the input and target features.
+    
     Args:
-        refimg_fea: the feature map of reference image, [B,C,H,W]
-        targetimg_fea: the feature map of target image, [B,C,H,W]
-        max_disp: the maximum disparity
-    Returns:
-        cost_volume: the correlation volume, [B, max_disp, H, W]
+        output_feats: Pytorch tensor (B,N,dim)
+        target_feats: Pytorch tensor (B,N,dim)
     """
-    B, C, H, W = refimg_fea.shape
-    volume = refimg_fea.new_zeros(B, max_disp, H, W)
-    for i in range(max_disp):
-        if i > 0:
-            volume[:, i, :, i:] = (refimg_fea[:, :, :, i:] * targetimg_fea[:, :, :, :-i]).mean(dim=1)
-        else:
-            volume[:, i, :, :] = (refimg_fea * targetimg_fea).mean(dim=1)
-    return volume
+    # Float casting
+    output_feats = output_feats.float()
+    target_feats = target_feats.float()
+
+    target_feats = F.normalize(target_feats, dim=-1)
+    # Compute similarities
+    target_sim = torch.matmul(target_feats, target_feats.transpose(-1, -2))
+
+    output_feats = F.normalize(output_feats, dim=-1)
+    # Compute similarities
+    output_sim = torch.matmul(output_feats, output_feats.transpose(-1, -2))
+
+    loss = F.mse_loss(output_sim, target_sim)
+    return loss

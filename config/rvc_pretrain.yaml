@@ -2,7 +2,7 @@ defaults:
   - default
   - _self_
 
-exp_name: rvc_pretrain
+exp_name: rvc_pretrain_irs
 val_epoch_freq: 1
 
 data:
@@ -26,6 +26,7 @@ data:
         - carla_highres
         - vkitti2
         - booster
+        - irs
       folds: 
         - 1
         - 1
@@ -36,6 +37,7 @@ data:
         - 50
         - 3
         - 20
+        - 1
     batch_size: 32
 
 model:
@@ -46,7 +48,7 @@ max_epochs: 5
 
 checkpoint:
   save_freq: 1
-  resume_checkpoint_path: logs/fsd_pretrain/ckpts/checkpoint.pt
+  resume_checkpoint_path: logs/rvc_pretrain_irs/ckpts/checkpoint_0.pt
   no_resume_optimizer: True
 
 loss:
