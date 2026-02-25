@@ -62,7 +62,6 @@ logging:
         - loss_disp
         - loss_disp_vit
         - loss_disp_regress
-        - loss_gram_anchoring
     val:
       keys_to_log: []
 

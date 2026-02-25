@@ -31,10 +31,13 @@ class BlendConv(nn.Module):
             groups=groups,
             bias=False,
         )
+        # initialize with zero
         nn.init.zeros_(self.proj_asym.weight)
     
     def forward(self, img):
+        # first 3 channels: original image
         x1 = self.proj(img[:, :3].contiguous())
+        # last channels: right-shifted versions of the original image
         x2 = self.proj_asym(img[:, 3:].contiguous())
         return x1 + torch.cat((torch.zeros_like(x2), x2), dim=1)
 
@@ -47,7 +50,7 @@ class DispViT(nn.Module):
         'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
     }
 
-    def __init__(self, encoder_type="vitl", init_weights=True):
+    def __init__(self, encoder_type="vitl", groups=8, init_weights=True):
         super().__init__()
 
         self.intermediate_layer_idx = {
@@ -58,6 +61,7 @@ class DispViT(nn.Module):
         }
 
         self.encoder_type = encoder_type
+        self.groups = groups
 
         dinov2_model = getattr(importlib.import_module("..layers.dinov2", __package__), f"dinov2_{encoder_type}14")
         encoder = dinov2_model(pretrained=init_weights)
@@ -73,8 +77,8 @@ class DispViT(nn.Module):
         checkpoint = torch.load("depth_anything_v2_vitl.pth", map_location="cpu", weights_only=True)
         self.load_state_dict(checkpoint, strict=False)
 
-        # Reuse the pretrained Conv2d weights of patch embed layer and make it work with 6 input channels
-        self.__build_patch_embed__(self.pretrained.patch_embed, groups=8)
+        # Reuse the pretrained Conv2d weights of patch embed layer and make it work with mixed input channels
+        self.__build_patch_embed__(self.pretrained.patch_embed, groups=groups)
 
         # Register normalization constants as buffers
         for name, value in (("_resnet_mean", _RESNET_MEAN), ("_resnet_std", _RESNET_STD)):
@@ -85,6 +89,7 @@ class DispViT(nn.Module):
         patch_embed.proj = new_proj
 
     def forward(self, batch):
+        # Normalize images
         img1 = (batch["img1"] / 255.0 - self._resnet_mean) / self._resnet_std
         img2 = (batch["img2"] / 255.0 - self._resnet_mean) / self._resnet_std
 
@@ -99,12 +104,10 @@ class DispViT(nn.Module):
             raise ValueError(f"Expected 3 input channels, got {C_in}")
         
         # Shift img2 along width
-        groups = 8
-        shift_unit = 192 // groups
-        shifts = [i * shift_unit for i in range(groups)]
+        shift_unit = 192 // self.groups
+        shifts = [i * shift_unit for i in range(self.groups)]
         img = torch.cat([img1] + shift_along_width(img2, shifts), dim=1)
         
-        # Normalize images
         patch_h, patch_w = H // self.pretrained.patch_size, W // self.pretrained.patch_size
 
         features = self.pretrained.get_intermediate_layers(img, self.intermediate_layer_idx[self.encoder_type], return_class_token=True)

@@ -138,14 +138,13 @@ class RefineLoss(torch.nn.Module):
         loss_logits = disp_softmax(predictions["disp_logits"], gt_disp, valid)
 
         # Gram loss computation
-        loss_gram_anchoring = self.gram_loss(predictions, batch)
+        #loss_gram_anchoring = self.gram_loss(predictions, batch)
 
         loss_dict = {
-            "objective": sum(w * l for w, l in zip(self.weights, loss_disp)) + loss_disp_regress * self.regress["disp_weight"] + loss_logits * self.regress["logit_weight"] + loss_gram_anchoring * self.gram["weight"],
+            "objective": sum(w * l for w, l in zip(self.weights, loss_disp)) + loss_disp_regress * self.regress["disp_weight"] + loss_logits * self.regress["logit_weight"],
             "loss_disp": loss_disp_[-1],
             "loss_disp_vit": loss_disp_vit[-1],
             "loss_disp_regress": loss_disp_regress,
-            "loss_gram_anchoring": loss_gram_anchoring,
             **{f"loss_disp_{i}": l for i, l in enumerate(loss_disp)},
         }
         return loss_dict

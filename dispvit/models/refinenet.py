@@ -534,7 +534,7 @@ class RefineLayer(nn.Module):
         Returns: [B,H,W,C]
         """
         # readout
-        x = self.readout(x, context, x_pos=pos_embed)
+        # x = self.readout(x, context, x_pos=pos_embed)
         x = self.nmp(x, pos_embed=pos_embed, attn_mask=attn_mask)
         # update
         context = self.update(context, x, context_pos=pos_embed)
@@ -807,60 +807,18 @@ class RefineNet(nn.Module):
         img2 = input['img2']
         img1 = (img1 / 255.0 - self._resnet_mean) / self._resnet_std
         img2 = (img2 / 255.0 - self._resnet_mean) / self._resnet_std
+        init_disp = input["init_disp"]  # [B,H,W]
+        init_disp = einops.repeat(init_disp, 'b h w -> b (h hs) (w ws)', hs=2, ws=2).unsqueeze(1)
         self.padder = InputPadder(img1.shape, mode="nmrf", divis_by=8)
-        img1, img2 = self.padder.pad(img1, img2)
-        img1_small_small = nn.functional.interpolate(img1, scale_factor=0.25, align_corners=False, mode='bilinear')
-        img2_small_small = nn.functional.interpolate(img2, scale_factor=0.25, align_corners=False, mode='bilinear')
+        img1, img2, init_disp = self.padder.pad(img1, img2, init_disp)
         img1_small = nn.functional.interpolate(img1, scale_factor=0.5, align_corners=False, mode='bilinear')
         img2_small = nn.functional.interpolate(img2, scale_factor=0.5, align_corners=False, mode='bilinear')
-        input_small = {'img1': (img1_small_small * self._resnet_std + self._resnet_mean) * 255.0, 'img2': (img2_small_small * self._resnet_std + self._resnet_mean) * 255.0}
         
-        # regression network to get initial disparity
+        
+        input_ = {'img1': (img1_small * self._resnet_std + self._resnet_mean) * 255.0, 'img2': (img2_small * self._resnet_std + self._resnet_mean) * 255.0}
         with torch.autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16):
-            regression_output = self.regressor(input_small)
-        init_disp = regression_output["disp"].unsqueeze(1).float()  # [B,1,H,W]
-        # img1_small_ = nn.functional.interpolate(img1, scale_factor=0.25, align_corners=False, mode='bilinear')
-        # img2_small_ = nn.functional.interpolate(img2, scale_factor=0.25, align_corners=False, mode='bilinear')
-        input = {'img1': (img1_small * self._resnet_std + self._resnet_mean) * 255.0, 'img2': (img2_small * self._resnet_std + self._resnet_mean) * 255.0}
-        with torch.autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16):
-            regression_output = self.regressor(input)
+            regression_output = self.regressor(input_)
         context_raw = regression_output["feature"].float()  # [B,C,H,W]
-
-        # downsample context feature to 1/4 resolution
-        IH, IW = img1_small.shape[2:]
-        context = nn.functional.interpolate(context_raw, size=(IH // 4, IW // 4), mode='bilinear', align_corners=True).permute(0, 2, 3, 1).contiguous()
-
-        img_batch = torch.cat([img1_small, img2_small], dim=0)
-        fmap1, fmap2 = torch.chunk(self.extractor(img_batch), 2, dim=0)
-        
-        fmap1_concat = self.concatconv(fmap1)
-        fmap2_concat = self.concatconv(fmap2)
-        fmap1_gw = self.gw(fmap1)
-        fmap2_gw = self.gw(fmap2)
-
-        init_disp = einops.rearrange(init_disp, 'b 1 (h hs) (w ws) -> (b h w) (hs ws)', hs=2, ws=2) / 2
-        init_disp = torch.median(init_disp, dim=-1, keepdim=False).values  # [Bhw]
-        x, x_pos = self.patch_embed(init_disp, fmap1_concat, fmap2_concat, fmap1_gw, fmap2_gw, normalizer=128)
-
-        # compute attention mask for SW-MSA
-        attn_mask = [None]
-        H, W = fmap1.shape[2:]
-        if self.num_blocks > 1:
-            shift_size = self.window_size // 2
-            Hp = int(np.ceil(H / self.window_size)) * self.window_size
-            Wp = int(np.ceil(W / self.window_size)) * self.window_size
-            attn_mask.append(
-                WindowAttention.gen_shift_window_attn_mask((Hp, Wp), to_2tuple(self.window_size), shift_size, device=x.device)
-            )
-
-        for idx, blk in enumerate(self.blocks):
-            x, context = blk(x, x_pos, attn_mask[idx % 2], context)
-
-        x = self.norm(x)[None]
-        disp_update = self.head(x)  # [num_aux_layers,B,H,W,4*4]
-        init_disp = einops.rearrange(init_disp, '(b h w) -> 1 b h w 1', h=H, w=W)   
-        disp_all = nn.functional.relu(init_disp + disp_update)  # [num_aux_layers,B,H,W,4*4]
-        disp_all = einops.rearrange(disp_all, 'n b h w (hs ws) -> n b (h hs) (w ws)', hs=4, ws=4).contiguous() * 4
 
         # next stage
         # downsample context feature to 1/4 resolution
@@ -875,8 +833,7 @@ class RefineNet(nn.Module):
         fmap1_gw = self.gw(fmap1)
         fmap2_gw = self.gw(fmap2)
 
-        init_disp = disp_all[-1]
-        init_disp = einops.rearrange(init_disp, 'b (h hs) (w ws) -> (b h w) (hs ws)', hs=2, ws=2) / 2
+        init_disp = einops.rearrange(init_disp, 'b 1 (h hs) (w ws) -> (b h w) (hs ws)', hs=4, ws=4) / 2
         init_disp = torch.median(init_disp, dim=-1, keepdim=False).values  # [Bhw]
         x, x_pos = self.patch_embed(init_disp, fmap1_concat, fmap2_concat, fmap1_gw, fmap2_gw, normalizer=128)
 

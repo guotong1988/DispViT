@@ -2,7 +2,7 @@ defaults:
   - refinenet
   - _self_
 
-exp_name: refinenet_rvc_pretrain_gram_2
+exp_name: refinenet_rvc_pretrain_plus
 
 model:
   regressor_pretrained_path: logs/rvc_pretrain/ckpts/checkpoint.pt
@@ -46,5 +46,5 @@ val_epoch_freq: 1
 
 checkpoint:
   save_freq: 1
-  resume_checkpoint_path: logs/refinenet_rvc_pretrain_float_finetune/ckpts/checkpoint.pt
+  resume_checkpoint_path: logs/refinenet_rvc_pretrain_plus/ckpts/checkpoint_latest.pt
   no_resume_optimizer: True

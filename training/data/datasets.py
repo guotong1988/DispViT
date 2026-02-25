@@ -344,10 +344,19 @@ class Middlebury(StereoDataset):
             image1_list = sorted([os.path.join(root, "MiddEval3", f'{image_set}{split}', f'{name}/im0.png') for name in lines])
             image2_list = sorted([os.path.join(root, "MiddEval3", f'{image_set}{split}', f'{name}/im1.png') for name in lines])
             disp_list = sorted([os.path.join(root, "MiddEval3", f'training{split}', f'{name}/disp0GT.pfm') for name in lines]) if image_set == 'training' else [os.path.join(root, "MiddEval3", f'training{split}', 'Adirondack/disp0GT.pfm')]*len(image1_list)
+            self.init_disp_list = sorted([os.path.join(root, "MiddEval3_init", f'training{split}', f'{name}/disp0BridgeDepth.pfm') for name in lines]) if image_set == 'training' else sorted([os.path.join(root, "MiddEval3_init", f'test{split}', f'{name}/disp0BridgeDepth.pfm') for name in lines])
             assert len(image1_list) == len(image2_list) == len(disp_list) > 0, [image1_list, split]
             for img1, img2, disp in zip(image1_list, image2_list, disp_list):
                 self.image_list += [ [img1, img2] ]
                 self.disparity_list += [ disp ]
+
+    def __getitem__(self, index):
+        sample = super().__getitem__(index)
+        # disp_path = self.init_disp_list[index]
+        # disp = frame_utils.readPFM(disp_path).astype(np.float32)
+        # disp = np.array(disp).astype(np.float32)
+        # sample['init_disp'] = torch.from_numpy(disp)
+        return sample
 
 
 class SintelStereo(StereoDataset):
