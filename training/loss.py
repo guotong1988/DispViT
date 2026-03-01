@@ -84,9 +84,9 @@ class RefineLoss(torch.nn.Module):
         self.regress = regress
         self.gram = gram
 
-        pretrained_model_name_or_path = 'depth_anything_v2_vitl.pth'
-        self.dav2 = DepthAnything.from_pretrained(pretrained_model_name_or_path)
-        self.dav2.freeze()
+        # pretrained_model_name_or_path = 'depth_anything_v2_vitl.pth'
+        # self.dav2 = DepthAnything.from_pretrained(pretrained_model_name_or_path)
+        # self.dav2.freeze()
 
         # Register normalization constants as buffers
         for name, value in (("_resnet_mean", _RESNET_MEAN), ("_resnet_std", _RESNET_STD)):
@@ -127,11 +127,11 @@ class RefineLoss(torch.nn.Module):
         valid = torch.logical_and(batch["valid"], gt_disp < self.disp["max_disp"])
 
         disp_preds = predictions["disp_all"]
-        loss_disp_ = [self._loss_fn(pred, gt_disp, valid) for pred in disp_preds]
-        disp_vit_preds = predictions["disp_vit"]
-        loss_disp_vit = [self._loss_fn(pred, gt_disp, valid) for pred in disp_vit_preds]
-        assert len(disp_preds) == len(disp_vit_preds), f"Expected the same number of predictions from both branches, but got {len(disp_preds)} and {len(disp_vit_preds)}"
-        loss_disp = [l1 + l2 for l1, l2 in zip(loss_disp_, loss_disp_vit)]
+        loss_disp = [self._loss_fn(pred, gt_disp, valid) for pred in disp_preds]
+        # disp_vit_preds = predictions["disp_vit"]
+        # loss_disp_vit = [self._loss_fn(pred, gt_disp, valid) for pred in disp_vit_preds]
+        # assert len(disp_preds) == len(disp_vit_preds), f"Expected the same number of predictions from both branches, but got {len(disp_preds)} and {len(disp_vit_preds)}"
+        # loss_disp = [l1 + l2 for l1, l2 in zip(loss_disp_, loss_disp_vit)]
         assert len(loss_disp) == len(self.weights), f"Expected {len(self.weights)} disparity predictions, but got {len(loss_disp)}"
 
         loss_disp_regress = disp_loss(predictions["disp_regress"], gt_disp, valid)
@@ -142,8 +142,8 @@ class RefineLoss(torch.nn.Module):
 
         loss_dict = {
             "objective": sum(w * l for w, l in zip(self.weights, loss_disp)) + loss_disp_regress * self.regress["disp_weight"] + loss_logits * self.regress["logit_weight"],
-            "loss_disp": loss_disp_[-1],
-            "loss_disp_vit": loss_disp_vit[-1],
+            "loss_disp": loss_disp[-1],
+            # "loss_disp_vit": loss_disp_vit[-1],
             "loss_disp_regress": loss_disp_regress,
             **{f"loss_disp_{i}": l for i, l in enumerate(loss_disp)},
         }

@@ -515,17 +515,17 @@ class RefineLayer(nn.Module):
         self.nmp = SwinNMP(dim, qkv_dim=qkv_dim, num_heads=num_heads, window_size=window_size, shift_size=shift_size, mlp_ratio=mlp_ratio, 
                            attn_drop=attn_drop, drop_path=drop_path, drop=drop, act_layer=act_layer, norm_layer=norm_layer)
         
-        kwargs = dict(
-            dim=dim,
-            num_heads=num_heads,
-            mlp_ratio=mlp_ratio,
-            norm_layer=norm_layer,
-            norm_mem=True,
-        )
-        self.readout = CrossBlock(q_dim=dim+31, kv_dim=dim, window_size=window_size, **kwargs)
-        self.update = CrossBlock(q_dim=dim, kv_dim=dim+31, window_size=window_size, **kwargs)
+        # kwargs = dict(
+        #     dim=dim,
+        #     num_heads=num_heads,
+        #     mlp_ratio=mlp_ratio,
+        #     norm_layer=norm_layer,
+        #     norm_mem=True,
+        # )
+        # self.readout = CrossBlock(q_dim=dim+31, kv_dim=dim, window_size=window_size, **kwargs)
+        # self.update = CrossBlock(q_dim=dim, kv_dim=dim+31, window_size=window_size, **kwargs)
         
-    def forward(self, x, pos_embed, attn_mask, context):
+    def forward(self, x, pos_embed, attn_mask):
         """
         x: [B,H,W,C], hypothesis embedding
         pos_embed: [B,H,W,C'], encoding of the underlying disparity
@@ -537,8 +537,8 @@ class RefineLayer(nn.Module):
         # x = self.readout(x, context, x_pos=pos_embed)
         x = self.nmp(x, pos_embed=pos_embed, attn_mask=attn_mask)
         # update
-        context = self.update(context, x, context_pos=pos_embed)
-        return x, context
+        # context = self.update(context, x, context_pos=pos_embed)
+        return x
 
 
 class Head(nn.Module):
@@ -617,7 +617,7 @@ class RefineNet(nn.Module):
         ])
 
         self.head = Head(embed_dim, embed_dim, 4*4, 3)
-        self.vit_refine = Head(embed_dim, embed_dim, 4*4, 3)
+        # self.vit_refine = Head(embed_dim, embed_dim, 4*4, 3)
 
         # init weights
         self.apply(self._init_weights)
@@ -647,7 +647,7 @@ class RefineNet(nn.Module):
         # logging.info(f"Model state loaded. Missing keys: {missing or 'None'}. Unexpected keys: {unexpected or 'None'}.")
 
         # Freeze regressor weights
-        # self.free_regressor()
+        self.free_regressor()
 
         # Register normalization constants as buffers
         for name, value in (("_resnet_mean", _RESNET_MEAN), ("_resnet_std", _RESNET_STD)):
@@ -729,20 +729,20 @@ class RefineNet(nn.Module):
         with torch.autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16):
             regression_output = self.regressor(input)
         init_disp = regression_output["disp"].unsqueeze(1).float().detach()  # [B,1,H,W]
-        context_raw = regression_output["feature"].float()  # [B,C,H,W]
+        # context_raw = regression_output["feature"].float()  # [B,C,H,W]
         # context = self.feature_down(context).permute(0, 2, 3, 1).contiguous()  # [B,H/4,W/4,C]
         img1 = (input['img1'] / 255.0 - self._resnet_mean) / self._resnet_std
         img2 = (input['img2'] / 255.0 - self._resnet_mean) / self._resnet_std
         if not self.training:
             self.padder = InputPadder(img1.shape, mode="nmrf", divis_by=4)
-            img1, img2, init_disp, context_raw = self.padder.pad(img1, img2, init_disp, context_raw)
+            img1, img2, init_disp = self.padder.pad(img1, img2, init_disp)
         else:
             self.padder = None
 
         # downsample context feature to 1/4 resolution
-        IH, IW = img1.shape[2:]
-        context = nn.functional.interpolate(context_raw, size=(IH // 4, IW // 4), mode='bilinear', align_corners=True).permute(0, 2, 3, 1).contiguous()
-        disp_vit_init = init_disp
+        # IH, IW = img1.shape[2:]
+        # context = nn.functional.interpolate(context_raw, size=(IH // 4, IW // 4), mode='bilinear', align_corners=True).permute(0, 2, 3, 1).contiguous()
+        # disp_vit_init = init_disp
 
         img_batch = torch.cat([img1, img2], dim=0)
         fmap1, fmap2 = torch.chunk(self.extractor(img_batch), 2, dim=0)
@@ -769,37 +769,31 @@ class RefineNet(nn.Module):
 
         return_intermediate = self.return_intermediate and self.training
         intermediates = []
-        vit_intermediates = []
         for idx, blk in enumerate(self.blocks):
-            x, context = blk(x, x_pos, attn_mask[idx % 2], context)
+            x = blk(x, x_pos, attn_mask[idx % 2])
             if return_intermediate:
                 intermediates.append(self.norm(x))
-                vit_intermediates.append(context)
 
         if return_intermediate:
             x = torch.stack(intermediates, dim=0)
-            vit = torch.stack(vit_intermediates, dim=0)
         else:
             x = self.norm(x)[None]
-            vit = context[None]
 
         disp_update = self.head(x)  # [num_aux_layers,B,H,W,4*4]
         init_disp = einops.rearrange(init_disp, '(b h w) -> 1 b h w 1', h=H, w=W)   
         disp_all = nn.functional.relu(init_disp + disp_update)  # [num_aux_layers,B,H,W,4*4]
         disp_all = einops.rearrange(disp_all, 'n b h w (hs ws) -> n b (h hs) (w ws)', hs=4, ws=4).contiguous() * 4
 
-        disp_vit = einops.rearrange(disp_vit_init, 'b 1 h w -> 1 b h w')
-        disp_update = self.vit_refine(vit) # [num_aux_layers,B,H,W,4*4]
-        disp_update = einops.rearrange(disp_update, 'n b h w (hs ws) -> n b (h hs) (w ws)', hs=4, ws=4).contiguous()
-        disp_vit = nn.functional.relu(disp_vit + disp_update)
+        # disp_vit = einops.rearrange(disp_vit_init, 'b 1 h w -> 1 b h w')
+        # disp_update = self.vit_refine(vit) # [num_aux_layers,B,H,W,4*4]
+        # disp_update = einops.rearrange(disp_update, 'n b h w (hs ws) -> n b (h hs) (w ws)', hs=4, ws=4).contiguous()
+        # disp_vit = nn.functional.relu(disp_vit + disp_update)
 
         disp = disp_all[-1]
         if self.padder is not None:
             disp = self.padder.unpad(disp.unsqueeze(1)).squeeze(1)
 
-        predictions = {"disp": disp, "disp_all": disp_all, "disp_vit": disp_vit, "disp_regress": regression_output["disp"], "disp_logits": regression_output["disp_logits"]}
-        if self.training:
-            predictions["gram_feats"] = regression_output["gram_feats"]
+        predictions = {"disp": disp, "disp_all": disp_all, "disp_regress": regression_output["disp"], "disp_logits": regression_output["disp_logits"]}
         return predictions
 
     def run_hierachical(self, input):

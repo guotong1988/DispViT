@@ -619,7 +619,7 @@ class Trainer:
             if data_iter % self.logging_conf.log_freq == 0:
                 progress.display(data_iter)
 
-            if self.steps["train"] % 1000 == 0:
+            if self.steps["train"] % 5000 == 0:
                 gc.collect()
                 torch.cuda.empty_cache()
                 torch.cuda.reset_peak_memory_stats()
