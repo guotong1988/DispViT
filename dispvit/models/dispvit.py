@@ -118,14 +118,13 @@ class DispViT(nn.Module):
 
         features = self.pretrained.get_intermediate_layers(img, self.intermediate_layer_idx[self.encoder_type], return_class_token=True)
 
-        disp, disp_logits, feature = self.prediction_head(features, patch_h, patch_w)
+        with torch.autocast(device_type=img.device.type, enabled=not self.training):
+            disp, disp_logits, feature = self.prediction_head(features, patch_h, patch_w)
         if padder is not None:
             disp = padder.unpad(disp.unsqueeze(1)).squeeze(1)
             disp_logits = padder.unpad(disp_logits)
             feature = padder.unpad(feature)
         out =  {"disp": disp, "disp_logits": disp_logits, "feature": feature}
-        if self.training:
-            out["gram_feats"] = features
         return out
 
     def prediction_head(self, x, patch_h, patch_w):

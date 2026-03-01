@@ -116,9 +116,10 @@ class DPTHead(nn.Module):
 
         # Fuse features from multiple layers.
         out = self.scratch_forward(out)
+        preds = self.scratch.output_conv2_(out)
         # Interpolate fused output to match target image resolution.
-        out = custom_interpolate(
-            out,
+        preds = custom_interpolate(
+            preds,
             (int(patch_h * self.patch_size), int(patch_w * self.patch_size)),
             mode="bilinear",
             align_corners=True,
@@ -127,7 +128,6 @@ class DPTHead(nn.Module):
         if self.feature_only:
             return out
         
-        preds = self.scratch.output_conv2_(out)
         return preds, out
 
     def scratch_forward(self, features: List[torch.Tensor]) -> torch.Tensor:
