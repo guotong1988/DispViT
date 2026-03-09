@@ -8,7 +8,7 @@ hydra:
   output_subdir: null
   
 exp_name: exp001
-num_workers: 8
+num_workers: 16
 seed_value: 42
 mode: train
 accum_steps: 1

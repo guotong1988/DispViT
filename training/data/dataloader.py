@@ -65,7 +65,8 @@ class DataLoader(ABC):
                 epoch=epoch,
                 worker_init_fn=self.worker_init_fn,
             ),
-            drop_last=self.drop_last
+            drop_last=self.drop_last,
+            prefetch_factor=4,
         )
 
 

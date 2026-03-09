@@ -193,7 +193,7 @@ def exr2hdr(exrpath):
     else:
         Channels = ['G']
     Size = (DW.max.x - DW.min.x + 1, DW.max.y - DW.min.y + 1)
-    Pixels = [np.fromstring(File.channel(c, PixType), dtype=np.float32) for c in Channels]
+    Pixels = [np.frombuffer(File.channel(c, PixType), dtype=np.float32) for c in Channels]
     hdr = np.zeros((Size[1],Size[0],CNum),dtype=np.float32)
     if (CNum == 1):
         hdr[:,:,0] = np.reshape(Pixels[0],(Size[1],Size[0]))

@@ -79,9 +79,10 @@ class DispViT(nn.Module):
             "vitb": "Base",
             "vitl": "Large",
         }
-        url = f"https://huggingface.co/depth-anything/Depth-Anything-V2-{encoder_map[encoder_type]}/resolve/main/depth_anything_v2_{encoder_type}.pth"
-        checkpoint = torch.hub.load_state_dict_from_url(url, map_location="cpu", weights_only=True)
-        self.load_state_dict(checkpoint, strict=False)
+        if encoder_type in encoder_map:  # ViT-G version of DAv2 has not been released
+            url = f"https://huggingface.co/depth-anything/Depth-Anything-V2-{encoder_map[encoder_type]}/resolve/main/depth_anything_v2_{encoder_type}.pth"
+            checkpoint = torch.hub.load_state_dict_from_url(url, map_location="cpu", weights_only=True)
+            self.load_state_dict(checkpoint, strict=False)
 
         # Reuse the pretrained Conv2d weights of patch embed layer and make it work with mixed input channels
         self.__build_patch_embed__(self.pretrained.patch_embed, groups=groups)

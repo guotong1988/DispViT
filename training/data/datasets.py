@@ -350,14 +350,6 @@ class Middlebury(StereoDataset):
                 self.image_list += [ [img1, img2] ]
                 self.disparity_list += [ disp ]
 
-    def __getitem__(self, index):
-        sample = super().__getitem__(index)
-        # disp_path = self.init_disp_list[index]
-        # disp = frame_utils.readPFM(disp_path).astype(np.float32)
-        # disp = np.array(disp).astype(np.float32)
-        # sample['init_disp'] = torch.from_numpy(disp)
-        return sample
-
 
 class SintelStereo(StereoDataset):
     def __init__(self, aug_params=None, root='datasets/SintelStereo'):
