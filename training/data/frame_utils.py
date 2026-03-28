@@ -88,26 +88,44 @@ def writePFM(file, array):
 
 def readDispKITTI(filename):
     disp = cv2.imread(filename, cv2.IMREAD_ANYDEPTH) / 256.0
-    valid = disp > 0.0
+    valid = (disp > 0.0) & (disp < 1e3)
     return disp, valid
 
 
-def readDispMiddlebury(file_name):
-    if basename(file_name) == 'disp0GT.pfm':
-        disp = readPFM(file_name).astype(np.float32)
-        assert len(disp.shape) == 2
+def readDispETH3D(file_name, nonocc=False):
+    disp = readPFM(file_name).astype(np.float32)
+    assert len(disp.shape) == 2
+    if nonocc:
         nocc_pix = file_name.replace('disp0GT.pfm', 'mask0nocc.png')
         assert exists(nocc_pix)
         nocc_pix = imageio.imread(nocc_pix) == 255
         assert np.any(nocc_pix)
-        return disp, nocc_pix
+        valid = nocc_pix & (disp > 0.0) & (disp < 1e3)
+    else:
+        valid = (disp > 0.0) & (disp < 1e3)
+    return disp, valid
+
+
+def readDispMiddlebury(file_name, nonocc=False):
+    if basename(file_name) == 'disp0GT.pfm':
+        disp = readPFM(file_name).astype(np.float32)
+        assert len(disp.shape) == 2
+        if nonocc:
+            nocc_pix = file_name.replace('disp0GT.pfm', 'mask0nocc.png')
+            assert exists(nocc_pix)
+            nocc_pix = imageio.imread(nocc_pix) == 255
+            assert np.any(nocc_pix)
+            valid = nocc_pix & (disp > 0.0) & (disp < 1e3)
+        else:
+            valid = (disp > 0.0) & (disp < 1e3)
+        return disp, valid
     elif basename(file_name) == 'disp0.pfm':
         disp = readPFM(file_name).astype(np.float32)
-        valid = disp < 1e3
+        valid = (disp > 0.0) & (disp < 1e3)
         return disp, valid
     elif splitext(file_name)[-1] == '.png':
         disp = np.array(Image.open(file_name)).astype(np.float32)
-        valid = disp > 0.0
+        valid = (disp > 0.0) & (disp < 1e3)
         return disp, valid
     
 
@@ -179,7 +197,8 @@ def readDispInStereo2K(file_name):
 def readDispFSD(file_name):
     disp = np.asarray(Image.open(file_name), dtype=np.float32)
     disp = disp[...,0]*255*255 + disp[...,1]*255 + disp[...,2]
-    return disp / 1000
+    valid = disp > 0
+    return disp / 1000, valid
 
 
 def exr2hdr(exrpath):
@@ -210,6 +229,12 @@ def load_exr(filename):
     if c == 1:
         hdr = np.squeeze(hdr)
     return hdr
+
+
+def readDispWMGStereo(filename):
+    disp = np.load(filename)
+    valid = disp > 0
+    return disp, valid
 
 
 def read_gen(file_name, pil=False):

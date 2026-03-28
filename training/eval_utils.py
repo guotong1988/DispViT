@@ -1,7 +1,5 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
 
-# Copyright (c) Facebook, Inc. and its affiliates.
-
 from collections import OrderedDict, abc
 import functools
 import itertools

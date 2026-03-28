@@ -8,7 +8,7 @@ data:
   train:
     batch_size: 8
     dataset:
-      crop_size: [392, 784]
+      crop_size: [[336, 896], [392, 784], [448, 672]]
   val_dataset_names:
     - things
 
@@ -17,7 +17,7 @@ model:
   regressor:
     _target_: dispvit.models.dispvit.DispViT
     encoder_type: vitl
-  regressor_pretrained_path: logs/sf_rvc_finetune_bs64/ckpts/checkpoint.pt
+  regressor_pretrained_path: null
   extractor:
     _target_: dispvit.models.extractor.ConvNextExtractor
     output_dim: 128
@@ -43,8 +43,6 @@ loss:
     disp_weight: 0.1
     logit_weight: 1.0
   loss_type: l1
-  gram:
-    weight: 1.0
 
 logging:
   log_dir: logs/${exp_name}
@@ -57,13 +55,11 @@ logging:
       keys_to_log:
         - loss_objective
         - loss_disp
-        # - loss_disp_vit
         - loss_disp_regress
     val:
       keys_to_log: []
 
 optim:
-  frozen_module_names: ["regressor"]
 
   amp:
     enabled: False
@@ -81,28 +77,28 @@ optim:
               end_value: 1e-7
           lengths: [0.05, 0.95]
           interval_scaling: ['rescaled', 'rescaled']
-      # - scheduler:
-      #     _target_: fvcore.common.param_scheduler.CompositeParamScheduler
-      #     schedulers:
-      #       - _target_: fvcore.common.param_scheduler.LinearParamScheduler
-      #         start_value: 1e-7
-      #         end_value: 5e-5
-      #       - _target_: fvcore.common.param_scheduler.CosineParamScheduler
-      #         start_value: 5e-5
-      #         end_value: 1e-7
-      #     lengths: [0.05, 0.95]
-      #     interval_scaling: ['rescaled', 'rescaled']
-      #   param_names:
-      #     - regressor.*
+      - scheduler:
+          _target_: fvcore.common.param_scheduler.CompositeParamScheduler
+          schedulers:
+            - _target_: fvcore.common.param_scheduler.LinearParamScheduler
+              start_value: 1e-8
+              end_value: 1e-4
+            - _target_: fvcore.common.param_scheduler.CosineParamScheduler
+              start_value: 1e-4
+              end_value: 1e-8
+          lengths: [0.05, 0.95]
+          interval_scaling: ['rescaled', 'rescaled']
+        param_names:
+          - regressor.*
     weight_decay:
       - scheduler:
           _target_: fvcore.common.param_scheduler.ConstantParamScheduler
           value: 0.00001
-      # - scheduler:
-      #     _target_: fvcore.common.param_scheduler.ConstantParamScheduler
-      #     value: 0.05
-      #   param_names:
-      #     - regressor.*
+      - scheduler:
+          _target_: fvcore.common.param_scheduler.ConstantParamScheduler
+          value: 0.05
+        param_names:
+          - regressor.*
 
   gradient_clip:
     _target_: training.train_utils.gradient_clip.GradientClipper
@@ -113,12 +109,9 @@ optim:
       - module_name: ["head"]
         max_norm: 1.0  # feel free to reduce this if see instabilities
         norm_type: 2
-      # - module_name: ["vit_refine"]
-      #   max_norm: 1.0  # feel free to reduce this if see instabilities
-      #   norm_type: 2
       - module_name: ["norm", "blocks"]
         max_norm: 1.0  # feel free to reduce this if see instabilities
         norm_type: 2
-      # - module_name: ["regressor"]
-      #   max_norm: 1.0  # feel free to reduce this if see instabilities
-      #   norm_type: 2
+      - module_name: ["regressor"]
+        max_norm: 1.0  # feel free to reduce this if see instabilities
+        norm_type: 2

@@ -3,11 +3,14 @@ import os
 from pathlib import Path
 from glob import glob
 import os.path as osp
+import random
+import datetime
 import numpy as np
 import torch
 import torch.nn.functional as F
 from typing import Iterable, Optional, TypeVar, List, Tuple, Union
 
+from functools import partial
 from . import frame_utils
 from .transforms import FlowAugmentor, SparseFlowAugmentor
 from .base.easy_dataset import EasyDataset
@@ -55,11 +58,29 @@ def read_all_lines(filename):
     return lines
 
 
+def seed_all_rng(seed=None):
+    """
+    Set the random seed for the RNG in torch, numpy and python.
+
+    Args:
+        seed (int): if None, will use a strong random seed.
+    """
+    if seed is None:
+        seed = (
+            os.getpid()
+            + int(datetime.now().strftime("%S%f"))
+            + int.from_bytes(os.urandom(2), "big")
+        )
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+
 class StereoDataset(EasyDataset):
-    def __init__(self, aug_params=None, sparse=False, reader=None):
+    def __init__(self, aug_params=None, sparse=False, reader=None, resolution='F'):
         self.augmentor = None
         self.sparse = sparse
-        self.img_pad = aug_params.pop("img_pad", None) if aug_params is not None else None
         if aug_params is not None and "crop_size" in aug_params:
             if self.sparse:
                 self.augmentor = SparseFlowAugmentor(**aug_params)
@@ -73,8 +94,17 @@ class StereoDataset(EasyDataset):
             self.disparity_reader = reader
 
         self.is_test = False
+        self.init_seed = False
         self.disparity_list = []
         self.image_list = []
+        if resolution not in ['F', 'H', 'Q']:
+            raise ValueError(f"Non recognized resolution '{resolution}'")
+        elif resolution == 'F':
+            self.skip = 1
+        elif resolution == 'H':
+            self.skip = 2
+        else:  # Q
+            self.skip = 4
 
     def __getitem__(self, index):
 
@@ -94,6 +124,13 @@ class StereoDataset(EasyDataset):
             sample['img2'] = torch.from_numpy(img2).permute(2, 0, 1).float()
             sample['meta'] = self.image_list[index][0]
             return sample
+
+        if not self.init_seed:
+            worker_info = torch.utils.data.get_worker_info()
+            initial_seed = torch.initial_seed() % 2**31
+            if worker_info is not None:
+                seed_all_rng(initial_seed + worker_info.id)
+                self.init_seed = True
         
         if isinstance(index, tuple):
             index, res_index = index
@@ -104,14 +141,16 @@ class StereoDataset(EasyDataset):
         disp = self.disparity_reader(disp_path)
         if isinstance(disp, tuple):
             disp, valid = disp
+            valid = valid & (disp > 0) & (disp < 1e3)
         else:
-            valid = disp < 512
+            valid = (disp > 0) & (disp < 1e3)
 
         img1 = frame_utils.read_gen(self.image_list[index][0])
         img2 = frame_utils.read_gen(self.image_list[index][1])
         img1 = np.array(img1).astype(np.uint8)
         img2 = np.array(img2).astype(np.uint8)
         disp = np.array(disp).astype(np.float32)
+        disp = np.nan_to_num(disp, nan=0.0, posinf=0.0, neginf=0.0)
         flow = np.stack([disp, np.zeros_like(disp)], axis=-1)
 
         # grayscale images
@@ -128,20 +167,15 @@ class StereoDataset(EasyDataset):
             else:
                 img1, img2, flow = self.augmentor(img1, img2, flow, res_index)
 
-        sample['img1'] = torch.from_numpy(img1).permute(2, 0, 1).float()
-        sample['img2'] = torch.from_numpy(img2).permute(2, 0, 1).float()
-        sample['disp'] = torch.from_numpy(flow).permute(2, 0, 1).float()[0]
+        sample['img1'] = torch.from_numpy(img1).permute(2, 0, 1).float()[:, ::self.skip, ::self.skip]
+        sample['img2'] = torch.from_numpy(img2).permute(2, 0, 1).float()[:, ::self.skip, ::self.skip]
+        sample['disp'] = torch.from_numpy(flow).permute(2, 0, 1).float()[:, ::self.skip, ::self.skip][0] / self.skip
 
         if self.sparse:
-            valid = torch.from_numpy(valid)
+            valid = torch.from_numpy(valid)[::self.skip, ::self.skip]
         else:
-            valid = sample['disp'] < 512
+            valid = (sample['disp'] > 0) & (sample['disp'] < 1e3)
         sample['valid'] = valid
-
-        if self.img_pad is not None:
-            padH, padW = self.img_pad
-            img1 = F.pad(img1, [padW]*2 + [padH]*2)
-            img2 = F.pad(img2, [padW]*2 + [padH]*2)
         
         return sample
     
@@ -232,8 +266,8 @@ class SceneFlowDatasets(StereoDataset):
 
 
 class ETH3D(StereoDataset):
-    def __init__(self, aug_params=None, root='datasets/ETH3D', split='training'):
-        super(ETH3D, self).__init__(aug_params, sparse=True)
+    def __init__(self, aug_params=None, root='datasets/ETH3D', split='training', nonocc=False):
+        super(ETH3D, self).__init__(aug_params, sparse=True, reader=partial(frame_utils.readDispETH3D, nonocc=nonocc))
 
         image1_list = sorted( glob(osp.join(root, f'two_view_{split}/*/im0.png')) )
         image2_list = sorted( glob(osp.join(root, f'two_view_{split}/*/im1.png')) )
@@ -245,67 +279,33 @@ class ETH3D(StereoDataset):
 
 
 class KITTI(StereoDataset):
-    def __init__(self, aug_params=None, root='datasets/KITTI', split='training', image_set='kitti_mix'):
+    def __init__(self, aug_params=None, root='datasets/KITTI', split='training', image_set='kitti_mix', nonocc=False):
         super(KITTI, self).__init__(aug_params, sparse=True, reader=frame_utils.readDispKITTI)
         assert os.path.exists(root)
+        occ_str = 'noc' if nonocc else 'occ'
+        if image_set == '2012':
+            root = osp.join(root, 'KITTI_2012')
+            disp_prefix = osp.join(root, 'training', f'disp_{occ_str}')
+            images1 = sorted(glob(osp.join(root, split, 'colored_0/*_10.png')))
+            images2 = sorted(glob(osp.join(root, split, 'colored_1/*_10.png')))
+        elif image_set == '2015':
+            root = osp.join(root, 'KITTI_2015')
+            disp_prefix = osp.join(root, 'training', f'disp_{occ_str}_0')
+            images1 = sorted(glob(osp.join(root, split, 'image_2/*_10.png')))
+            images2 = sorted(glob(osp.join(root, split, 'image_3/*_10.png')))
+        
+        for img1, img2 in zip(images1, images2):
+            self.image_list += [ [img1, img2] ]
 
         if split == 'testing':
             self.is_test = True
-            if image_set == 'kitti_2012':
-                root = osp.join(root, 'KITTI_2012')
-                images1 = sorted(glob(osp.join(root, 'testing', 'colored_0/*_10.png')))
-                images2 = sorted(glob(osp.join(root, 'testing', 'colored_1/*_10.png')))
-            elif image_set == 'kitti_2015':
-                root = osp.join(root, 'KITTI_2015')
-                images1 = sorted(glob(osp.join(root, 'testing', 'image_2/*_10.png')))
-                images2 = sorted(glob(osp.join(root, 'testing', 'image_3/*_10.png')))
-            else:
-                raise ValueError("Unknown dataset for test: '{}'".format(image_set))
-            for img1, img2 in zip(images1, images2):
-                self.image_list += [ [img1, img2] ]
-
         else:
-            this_dir = os.path.dirname(__file__)
-            kitti_dict = {
-                'kitti_mix_2012_train': f'{this_dir}/filenames/KITTI_mix_2012_train.txt',
-                'kitti_mix_2015_train': f'{this_dir}/filenames/KITTI_mix_2015_train.txt',
-                'kitti_2012_val': f'{this_dir}/filenames/KITTI_2012_val.txt',
-                'kitti_2015_val': f'{this_dir}/filenames/KITTI_2015_val.txt',
-                'kitti_mix': f'{this_dir}/filenames/KITTI_mix.txt',
-                'kitti_2015_train': f'{this_dir}/filenames/KITTI_2015_train.txt',
-                'kitti_2015_trainval': f'{this_dir}/filenames/KITTI_2015_trainval.txt',
-                'kitti_2012_train': f'{this_dir}/filenames/KITTI_2012_train.txt',
-                'kitti_2012_trainval': f'{this_dir}/filenames/KITTI_2012_trainval.txt',
-            }
-
-            assert image_set in kitti_dict.keys()
-            data_filename = kitti_dict[image_set]
-
-            self._root_12 = os.path.join(root, 'KITTI_2012')
-            self._root_15 = os.path.join(root, 'KITTI_2015')
-
-            self.load_path(data_filename)
-
-    def load_path(self, list_filename):
-        lines = read_all_lines(list_filename)
-        splits = [line.split() for line in lines]
-        for line in splits:
-            left_name = line[0].split('/')[1]
-            if left_name.startswith('image'):
-                root = self._root_15
-            else:
-                root = self._root_12
-            img1 = os.path.join(root, line[0])
-            img2 = os.path.join(root, line[1])
-            self.image_list += [ [img1, img2] ]
-            if len(line) > 2:
-                disp = os.path.join(root, line[2])
-                self.disparity_list += [ disp ]
+            self.disparity_list = sorted(glob(os.path.join(disp_prefix, '*_10.png')))
 
 
 class Middlebury(StereoDataset):
-    def __init__(self, aug_params=None, root='datasets/Middlebury', split='F', image_set='training'):
-        super(Middlebury, self).__init__(aug_params, sparse=True, reader=frame_utils.readDispMiddlebury)
+    def __init__(self, aug_params=None, root='datasets/Middlebury', split='F', image_set='training', nonocc=False):
+        super(Middlebury, self).__init__(aug_params, sparse=True, reader=partial(frame_utils.readDispMiddlebury, nonocc=nonocc))
         assert os.path.exists(root)
         assert split in ["F", "H", "Q", "2005", "2006", "2014", "2021"]
 
@@ -326,6 +326,8 @@ class Middlebury(StereoDataset):
         elif split == "2014": # datasets/Middlebury/2014/Pipes-perfect/im0.png
             scenes = list((Path(root) / "2014").glob("*"))
             for scene in scenes:
+                if "imperfect" in scene:
+                    continue
                 for s in ["E","L",""]:
                     self.image_list += [ [str(scene / "im0.png"), str(scene / f"im1{s}.png")] ]
                     self.disparity_list += [ str(scene / "disp0.pfm") ]
@@ -347,7 +349,6 @@ class Middlebury(StereoDataset):
             image1_list = sorted([os.path.join(root, "MiddEval3", f'{image_set}{split}', f'{name}/im0.png') for name in lines])
             image2_list = sorted([os.path.join(root, "MiddEval3", f'{image_set}{split}', f'{name}/im1.png') for name in lines])
             disp_list = sorted([os.path.join(root, "MiddEval3", f'training{split}', f'{name}/disp0GT.pfm') for name in lines]) if image_set == 'training' else [os.path.join(root, "MiddEval3", f'training{split}', 'Adirondack/disp0GT.pfm')]*len(image1_list)
-            self.init_disp_list = sorted([os.path.join(root, "MiddEval3_init", f'training{split}', f'{name}/disp0BridgeDepth.pfm') for name in lines]) if image_set == 'training' else sorted([os.path.join(root, "MiddEval3_init", f'test{split}', f'{name}/disp0BridgeDepth.pfm') for name in lines])
             assert len(image1_list) == len(image2_list) == len(disp_list) > 0, [image1_list, split]
             for img1, img2, disp in zip(image1_list, image2_list, disp_list):
                 self.image_list += [ [img1, img2] ]
@@ -497,8 +498,8 @@ class IRS(StereoDataset):
 
 
 class Booster(StereoDataset):
-    def __init__(self, aug_params=None, root='datasets/booster', split='train'):
-        super().__init__(aug_params, sparse=True, reader=frame_utils.readDispBooster)
+    def __init__(self, aug_params=None, root='datasets/booster', split='train', resolution='F'):
+        super().__init__(aug_params, sparse=True, reader=frame_utils.readDispBooster, resolution=resolution)
         assert os.path.exists(root)
 
         folder_list = sorted(glob(osp.join(root, split + '/balanced/*')))        
@@ -516,7 +517,7 @@ class Booster(StereoDataset):
                     self.disparity_list += [ osp.join(folder, 'disp_00.npy') ]
 
 class FSD(StereoDataset):
-    def __init__(self, aug_params=None, root='datasets/FSD'):
+    def __init__(self, aug_params=None, root='datasets/FSD', size=None):
         super().__init__(aug_params, reader=frame_utils.readDispFSD)
         assert os.path.exists(root)
         root = Path(root)
@@ -528,6 +529,24 @@ class FSD(StereoDataset):
         left_disparity_pattern = str(root / "*/dataset/data/left/disparity/*.png")
         self.disparity_list = self._scan_pairs(left_disparity_pattern, None)
 
+        if size is not None:
+            self.image_list = self.image_list[:size]
+            self.disparity_list = self.disparity_list[:size]
+
+
+class WMGStereo(StereoDataset):
+    def __init__(self, aug_params=None, root='datasets/WMGStereo'):
+        super().__init__(aug_params, sparse=True, reader=frame_utils.readDispWMGStereo)
+        assert os.path.exists(root)
+        root = Path(root)
+
+        left_img_pattern = str(root / "*/*/frames/Image/camera_0/*.png")
+        right_img_pattern = str(root / "*/*/frames/Image/camera_1/*.png")
+        self.image_list = self._scan_pairs(left_img_pattern, right_img_pattern)
+
+        left_disparity_pattern = str(root / "*/*/frames/disparity/camera_0/*.npy")
+        self.disparity_list = self._scan_pairs(left_disparity_pattern, None)
+
 
 def build_train_dataset(crop_size, spatial_scale, yjitter, datasets, folds, saturation_range=None, img_gamma=None, do_flip=None):
     """ Create the training sets """
@@ -536,8 +555,6 @@ def build_train_dataset(crop_size, spatial_scale, yjitter, datasets, folds, satu
         aug_params["saturation_range"] = tuple(saturation_range)
     if img_gamma is not None:
         aug_params["gamma"] = img_gamma
-    if do_flip is not None:
-        aug_params["do_flip"] = do_flip
 
     train_dataset = None
     logger = logging.getLogger(__name__)
@@ -547,14 +564,20 @@ def build_train_dataset(crop_size, spatial_scale, yjitter, datasets, folds, satu
             new_dataset = Middlebury(aug_params, split=dataset_name.replace('middlebury_', ''))
             logger.info(f"{len(new_dataset)} samples from {dataset_name}")
         elif dataset_name == 'sceneflow':
-            new_dataset = SceneFlowDatasets(aug_params, dstype='frames_finalpass')
+            final_dataset = SceneFlowDatasets(aug_params, dstype='frames_finalpass')
+            clean_dataset = SceneFlowDatasets(aug_params, dstype='frames_cleanpass')
+            new_dataset = final_dataset + clean_dataset
             logger.info(f"{len(new_dataset)} samples from SceneFlow")
-        elif dataset_name == 'eth3d':
-            new_dataset = ETH3D(aug_params, split='training')
+        elif dataset_name.startswith('eth3d_'):
+            nonocc = (dataset_name.split('_')[-1] == 'nonocc')
+            new_dataset = ETH3D(aug_params, split='training', nonocc=nonocc)
             logger.info(f"{len(new_dataset)} samples from ETH3D")
-        elif 'kitti_' in dataset_name:
-            new_dataset = KITTI(aug_params, image_set=dataset_name)
-            logger.info(f"{len(new_dataset)} samples from KITTI")
+        elif dataset_name.startswith('kitti_'):
+            image_set = dataset_name.split('_')[1]
+            split = dataset_name.split('_')[2]
+            nonocc = (dataset_name.split('_')[-1] == 'nonocc')
+            new_dataset = KITTI(aug_params, image_set=image_set, split=split, nonocc=nonocc)
+            logger.info(f"{len(new_dataset)} samples from KITTI{image_set}_{split}")
         elif dataset_name == 'sintel_stereo':
             new_dataset = SintelStereo(aug_params)
             logger.info(f"{len(new_dataset)} samples from SintelStereo")
@@ -574,7 +597,8 @@ def build_train_dataset(crop_size, spatial_scale, yjitter, datasets, folds, satu
             new_dataset = VirtualKitti2(aug_params)
             logger.info(f"{len(new_dataset)} samples from VirtualKitti2")
         elif dataset_name.startswith('booster'):
-            new_dataset = Booster(aug_params)
+            resolution = dataset_name.split('_')[-1]
+            new_dataset = Booster(aug_params, resolution=resolution)
             logger.info(f"{len(new_dataset)} samples from Booster")
         elif dataset_name == 'in_stereo2k':
             new_dataset = InStereo2K(aug_params, variant='both')
@@ -585,6 +609,9 @@ def build_train_dataset(crop_size, spatial_scale, yjitter, datasets, folds, satu
         elif dataset_name == 'irs':
             new_dataset = IRS(aug_params)
             logger.info(f"{len(new_dataset)} samples from IRS")
+        elif dataset_name == 'wmgstereo':
+            new_dataset = WMGStereo(aug_params)
+            logger.info(f"{len(new_dataset)} samples from WMGStereo")
         else:
             raise ValueError(f"Unrecognized dataset {dataset_name}")
         if fold > 0:
@@ -599,15 +626,24 @@ def build_val_dataset(dataset_name):
     if dataset_name == 'things':
         val_dataset = SceneFlowDatasets(dstype='frames_finalpass', things_test=True)
         logger.info('Number of validation image pairs: %d' % len(val_dataset))
-    elif 'kitti' in dataset_name:
+    elif dataset_name.startswith('kitti_'):
         # perform validation using the KITTI (train) split
-        val_dataset = KITTI(image_set=dataset_name)
+        image_set = dataset_name.split('_')[1]
+        split = dataset_name.split('_')[2]
+        nonocc = (dataset_name.split('_')[-1] == 'nonocc')
+        val_dataset = KITTI(image_set=image_set, split=split, nonocc=nonocc)
         logger.info('Number of validation image pairs: %d' % len(val_dataset))
     elif dataset_name == 'eth3d':
-        val_dataset = ETH3D(split='training')
+        nonocc = (dataset_name.split('_')[-1] == 'nonocc')
+        val_dataset = ETH3D(split='training', nonocc=nonocc)
         logger.info('Number of validation image pairs: %d' % len(val_dataset))
     elif dataset_name.startswith("middlebury_"):
-        val_dataset = Middlebury(split=dataset_name.replace('middlebury_', ''))
+        split = dataset_name.split('_')[1]
+        nonocc = (dataset_name.split('_')[-1] == 'nonocc')
+        val_dataset = Middlebury(split=split, nonocc=nonocc)
+        logger.info('Number of validation image pairs: %d' % len(val_dataset))
+    elif dataset_name == 'booster':
+        val_dataset = Booster(resolution='Q')
         logger.info('Number of validation image pairs: %d' % len(val_dataset))
 
     return val_dataset

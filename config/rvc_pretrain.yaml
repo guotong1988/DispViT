@@ -2,7 +2,7 @@ defaults:
   - default
   - _self_
 
-exp_name: rvc_pretrain_irs
+exp_name: rvc_pretrain_vitg
 val_epoch_freq: 1
 
 data:
@@ -10,13 +10,14 @@ data:
     _target_: training.data.dataloader.DataLoader
     dataset:
       _target_: training.data.datasets.build_train_dataset
-      crop_size: [378, 784]
+      crop_size: [[336, 896], [392, 784], [448, 672]]
       spatial_scale: [-0.2, 0.4]
       yjitter: False
       saturation_range: [0, 1.4]
       img_gamma: null
       do_flip: False
-      datasets: 
+      datasets:
+        - fsd 
         - sceneflow
         - tartan_air
         - crestereo
@@ -25,9 +26,10 @@ data:
         - in_stereo2k
         - carla_highres
         - vkitti2
-        - booster
+        # - booster
         - irs
-      folds: 
+      folds:
+        - 1 
         - 1
         - 1
         - 1
@@ -36,19 +38,25 @@ data:
         - 100
         - 50
         - 3
-        - 20
+        #- 20
         - 1
     batch_size: 32
+    persistent_workers: True
+  val_dataset_names:
+    - kitti_2012_trainval
+    - kitti_2015_trainval
+    - eth3d
+    - middlebury_Q
 
 model:
   _target_: dispvit.models.dispvit.DispViT
-  encoder_type: vitl
+  encoder_type: vitg
 
 max_epochs: 5
 
 checkpoint:
-  save_freq: 1
-  resume_checkpoint_path: logs/rvc_pretrain_irs/ckpts/checkpoint_0.pt
+  save_freq: 10
+  resume_checkpoint_path: null
   no_resume_optimizer: True
 
 loss:
