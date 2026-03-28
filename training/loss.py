@@ -70,7 +70,7 @@ def disp_softmax(logits, labels, mask):
 
 @dataclass(eq=False)
 class RefineLoss(torch.nn.Module):
-    def __init__(self, disp, loss_type, regress, gram, **kwargs_ignored):
+    def __init__(self, disp, loss_type, regress, **kwargs_ignored):
         super().__init__()
         self.disp = disp
         self.weights = disp["weight"]
@@ -82,7 +82,6 @@ class RefineLoss(torch.nn.Module):
         else:
             self.criterion = F.smooth_l1_loss
         self.regress = regress
-        self.gram = gram
 
         # pretrained_model_name_or_path = 'depth_anything_v2_vitl.pth'
         # self.dav2 = DepthAnything.from_pretrained(pretrained_model_name_or_path)

@@ -142,7 +142,7 @@ class CatDataset (EasyDataset):
         return dataset[new_idx]
 
     @property
-    def _resolution(self):
+    def _resolutions(self):
         resolutions = self.datasets[0]._resolutions
         for dataset in self.datasets[1:]:
             assert tuple(dataset._resolutions) == tuple(resolutions)
